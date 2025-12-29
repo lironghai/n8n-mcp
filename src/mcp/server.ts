@@ -40,6 +40,7 @@ import { InstanceContext } from '../types/instance-context';
 import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
+import {handleListCredentialSchemaType} from "./handlers-n8n-manager";
 
 interface NodeRow {
   node_type: string;
@@ -1287,6 +1288,8 @@ export class N8NDocumentationMCPServer {
         case 'n8n_delete_credential':
             this.validateToolParams(name, args, ['id']);
             return n8nHandlers.handleDeleteCredential(args, this.instanceContext);
+        case 'n8n_list_credential_schema_type':
+            return n8nHandlers.handleListCredentialSchemaType(args, this.instanceContext);
         case 'n8n_get_credential_schema':
             this.validateToolParams(name, args, ['credentialTypeName']);
             return n8nHandlers.handleGetCredentialSchema(args, this.instanceContext);

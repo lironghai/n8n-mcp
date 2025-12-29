@@ -225,6 +225,10 @@ export const n8nManagementTools: ToolDefinition[] = [
         excludePinnedData: { 
           type: 'boolean', 
           description: 'Exclude pinned data from response (default: true)' 
+        },
+        name: { 
+          type: 'string', 
+          description: 'Filter by workflow name (case-insensitive fuzzy match)' 
         }
       }
     }
@@ -618,6 +622,15 @@ export const n8nManagementTools: ToolDefinition[] = [
             },
             required: ['id']
         }
+    },
+    {
+      name: 'n8n_list_credential_schema_type',
+      description: `Get list credential type.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+        }
+      }
     },
     {
         name: 'n8n_get_credential_schema',

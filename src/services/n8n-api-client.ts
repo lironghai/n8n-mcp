@@ -8,6 +8,8 @@ import {
   ExecutionListParams,
   ExecutionListResponse,
   Credential,
+  CredentialListParams,
+  CredentialListResponse,
   CredentialSchema,
   Tag,
   TagListParams,
@@ -399,6 +401,28 @@ export class N8nApiClient {
   }
 
   // Credential Management
+  /**
+   * Lists credentials from n8n instance.
+   *
+   * @param params - Query parameters for filtering and pagination
+   * @returns Paginated list of credentials
+   *
+   * @remarks
+   * This method handles two response formats for backwards compatibility:
+   * - Modern (n8n v0.200.0+): {data: Credential[], nextCursor?: string}
+   * - Legacy (older versions): Credential[] (wrapped automatically)
+   *
+   * @see https://github.com/czlonkowski/n8n-mcp/issues/349
+   */
+  async listCredentials(params: CredentialListParams = {}): Promise<CredentialListResponse> {
+    try {
+      const response = await this.client.get('/credentials', { params });
+      return this.validateListResponse<Credential>(response.data, 'credentials');
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
   async getCredential(id: string): Promise<Credential> {
     try {
       const response = await this.client.get(`/credentials/${id}`);

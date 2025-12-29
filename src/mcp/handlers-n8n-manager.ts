@@ -47,6 +47,8 @@ import {
 } from '../utils/cache-utils';
 import { processExecution } from '../services/execution-processor';
 import { checkNpmVersion, formatVersionMessage } from '../utils/npm-version-checker';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // ========================================================================
 // TypeScript Interfaces for Type Safety
@@ -403,6 +405,7 @@ const listWorkflowsSchema = z.object({
   tags: z.array(z.string()).optional(),
   projectId: z.string().optional(),
   excludePinnedData: z.boolean().optional(),
+  name: z.string().optional(),
 });
 
 const validateWorkflowSchema = z.object({
@@ -1004,8 +1007,14 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       ? input.tags.join(',')
       : undefined;
 
+    // When name filter is provided, we need to fetch more data first, then filter and apply limit
+    // Otherwise the limit is applied before filtering, causing fewer results than expected
+    const hasNameFilter = !!input.name;
+    const userLimit = input.limit || 100;
+    
     const response = await client.listWorkflows({
-      limit: input.limit || 100,
+      // When filtering by name, fetch max to ensure we get enough matches
+      limit: hasNameFilter ? 100 : userLimit,
       cursor: input.cursor,
       active: input.active,
       tags: tagsParam as any,  // API expects string, not array
@@ -1014,7 +1023,7 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
     });
     
     // Strip down workflows to only essential metadata
-    const minimalWorkflows = response.data.map(workflow => ({
+    let minimalWorkflows = response.data.map(workflow => ({
       id: workflow.id,
       name: workflow.name,
       active: workflow.active,
@@ -1024,6 +1033,20 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       tags: workflow.tags || [],
       nodeCount: workflow.nodes?.length || 0
     }));
+    
+    // Apply name fuzzy filter (case-insensitive)
+    if (input.name) {
+      const nameLower = input.name.toLowerCase();
+      minimalWorkflows = minimalWorkflows.filter(workflow => 
+        workflow.name.toLowerCase().includes(nameLower)
+      );
+    }
+    
+    // Apply user's limit after filtering
+    const hasMoreAfterLimit = minimalWorkflows.length > userLimit;
+    if (minimalWorkflows.length > userLimit) {
+      minimalWorkflows = minimalWorkflows.slice(0, userLimit);
+    }
 
     return {
       success: true,
@@ -1031,9 +1054,9 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
         workflows: minimalWorkflows,
         returned: minimalWorkflows.length,
         nextCursor: response.nextCursor,
-        hasMore: !!response.nextCursor,
-        ...(response.nextCursor ? { 
-          _note: "More workflows available. Use cursor to get next page." 
+        hasMore: !!response.nextCursor || hasMoreAfterLimit,
+        ...(response.nextCursor || hasMoreAfterLimit ? { 
+          _note: "More workflows available. Use cursor to get next page or increase limit." 
         } : {})
       }
     };
@@ -1855,6 +1878,39 @@ export async function handleDeleteCredential(args: unknown, context?: InstanceCo
 /**
  * Handle get credential schema request
  */
+export async function handleListCredentialSchemaType(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    // const filePath = path.join(__dirname, './data/credentials_type.json');
+    // let credentialSchema: any[] = [];
+    const credentialSchemaModule = await import('./credentials_type.json');
+    const credentialSchema = credentialSchemaModule.default || credentialSchemaModule;
+
+    // fs.readFile(filePath, 'utf8', (err, data) => {
+    //   if (err) {
+    //     console.error('读取文件时发生错误:', err);
+    //     return;
+    //   }
+    //
+    //   try {
+    //     credentialSchema = JSON.parse(data);
+    //   } catch (parseErr) {
+    //     console.error('解析 JSON 时发生错误:', parseErr);
+    //   }
+    // });
+
+    return {
+      success: true,
+      data: credentialSchema,
+      message: `Retrieved schema for credential type for "n8n_get_credential_schema" tool`
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
 export async function handleGetCredentialSchema(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
   try {
     const schema = z.object({
