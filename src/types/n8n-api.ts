@@ -30,6 +30,7 @@ export interface WorkflowNode {
   waitBetweenTries?: number;
   alwaysOutputData?: boolean;
   executeOnce?: boolean;
+  webhookId?: string; // n8n assigns this for webhook/form/chat trigger nodes
 }
 
 export interface WorkflowConnection {
@@ -56,6 +57,7 @@ export interface WorkflowSettings {
 export interface Workflow {
   id?: string;
   name: string;
+  description?: string; // Returned by GET but must be excluded from PUT/PATCH (n8n API limitation, Issue #431)
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
   active?: boolean; // Optional for creation as it's read-only
@@ -249,6 +251,28 @@ export interface HealthCheckResponse {
   };
 }
 
+// n8n Version Information
+export interface N8nVersionInfo {
+  version: string;          // Full version string, e.g., "1.119.0"
+  major: number;            // Major version number
+  minor: number;            // Minor version number
+  patch: number;            // Patch version number
+}
+
+// Settings data within the response
+export interface N8nSettingsData {
+  n8nVersion?: string;
+  versionCli?: string;
+  instanceId?: string;
+  [key: string]: unknown;
+}
+
+// Response from /rest/settings endpoint (unauthenticated)
+// The actual response wraps settings in a "data" property
+export interface N8nSettingsResponse {
+  data?: N8nSettingsData;
+}
+
 // Request Parameter Types
 export interface WorkflowListParams {
   limit?: number;
@@ -312,7 +336,7 @@ export interface McpToolResponse {
 }
 
 // Execution Filtering Types
-export type ExecutionMode = 'preview' | 'summary' | 'filtered' | 'full';
+export type ExecutionMode = 'preview' | 'summary' | 'filtered' | 'full' | 'error';
 
 export interface ExecutionPreview {
   totalNodes: number;
@@ -345,6 +369,10 @@ export interface ExecutionFilterOptions {
   itemsLimit?: number;
   includeInputData?: boolean;
   fieldsToInclude?: string[];
+  // Error mode specific options
+  errorItemsLimit?: number;       // Sample items from upstream node (default: 2)
+  includeStackTrace?: boolean;    // Include full stack trace (default: false)
+  includeExecutionPath?: boolean; // Include execution path to error (default: true)
 }
 
 export interface FilteredExecutionResponse {
@@ -372,6 +400,9 @@ export interface FilteredExecutionResponse {
 
   // Error information
   error?: Record<string, unknown>;
+
+  // Error mode specific (mode='error')
+  errorInfo?: ErrorAnalysis;
 }
 
 export interface FilteredNodeData {
@@ -389,4 +420,51 @@ export interface FilteredNodeData {
       truncated: boolean;
     };
   };
+}
+
+// Error Mode Types
+export interface ErrorAnalysis {
+  // Primary error information
+  primaryError: {
+    message: string;
+    errorType: string;  // NodeOperationError, NodeApiError, etc.
+    nodeName: string;
+    nodeType: string;
+    nodeId?: string;
+    nodeParameters?: Record<string, unknown>;  // Relevant params only (no secrets)
+    stackTrace?: string;  // Truncated by default
+  };
+
+  // Upstream context (input to error node)
+  upstreamContext?: {
+    nodeName: string;
+    nodeType: string;
+    itemCount: number;
+    sampleItems: unknown[];  // Configurable limit, default 2
+    dataStructure: Record<string, unknown>;
+  };
+
+  // Execution path leading to error (from trigger to error)
+  executionPath?: Array<{
+    nodeName: string;
+    status: 'success' | 'error' | 'skipped';
+    itemCount: number;
+    executionTime?: number;
+  }>;
+
+  // Additional errors (if workflow had multiple failures)
+  additionalErrors?: Array<{
+    nodeName: string;
+    message: string;
+  }>;
+
+  // AI-friendly suggestions
+  suggestions?: ErrorSuggestion[];
+}
+
+export interface ErrorSuggestion {
+  type: 'fix' | 'investigate' | 'workaround';
+  title: string;
+  description: string;
+  confidence: 'high' | 'medium' | 'low';
 }

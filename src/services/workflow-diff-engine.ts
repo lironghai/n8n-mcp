@@ -25,6 +25,8 @@ import {
   UpdateNameOperation,
   AddTagOperation,
   RemoveTagOperation,
+  ActivateWorkflowOperation,
+  DeactivateWorkflowOperation,
   CleanStaleConnectionsOperation,
   ReplaceConnectionsOperation
 } from '../types/workflow-diff';
@@ -32,6 +34,7 @@ import { Workflow, WorkflowNode, WorkflowConnection } from '../types/n8n-api';
 import { Logger } from '../utils/logger';
 import { validateWorkflowNode, validateWorkflowConnections } from './n8n-validation';
 import { sanitizeNode, sanitizeWorkflowNodes } from './node-sanitizer';
+import { isActivatableTrigger } from '../utils/node-type-utils';
 
 const logger = new Logger({ prefix: '[WorkflowDiffEngine]' });
 
@@ -214,12 +217,23 @@ export class WorkflowDiffEngine {
         }
 
         const operationsApplied = request.operations.length;
+
+        // Extract activation flags from workflow object
+        const shouldActivate = (workflowCopy as any)._shouldActivate === true;
+        const shouldDeactivate = (workflowCopy as any)._shouldDeactivate === true;
+
+        // Clean up temporary flags
+        delete (workflowCopy as any)._shouldActivate;
+        delete (workflowCopy as any)._shouldDeactivate;
+
         return {
           success: true,
           workflow: workflowCopy,
           operationsApplied,
           message: `Successfully applied ${operationsApplied} operations (${nodeOperations.length} node ops, ${otherOperations.length} other ops)`,
-          warnings: this.warnings.length > 0 ? this.warnings : undefined
+          warnings: this.warnings.length > 0 ? this.warnings : undefined,
+          shouldActivate: shouldActivate || undefined,
+          shouldDeactivate: shouldDeactivate || undefined
         };
       }
     } catch (error) {
@@ -262,6 +276,10 @@ export class WorkflowDiffEngine {
       case 'addTag':
       case 'removeTag':
         return null; // These are always valid
+      case 'activateWorkflow':
+        return this.validateActivateWorkflow(workflow, operation);
+      case 'deactivateWorkflow':
+        return this.validateDeactivateWorkflow(workflow, operation);
       case 'cleanStaleConnections':
         return this.validateCleanStaleConnections(workflow, operation);
       case 'replaceConnections':
@@ -314,6 +332,12 @@ export class WorkflowDiffEngine {
         break;
       case 'removeTag':
         this.applyRemoveTag(workflow, operation);
+        break;
+      case 'activateWorkflow':
+        this.applyActivateWorkflow(workflow, operation);
+        break;
+      case 'deactivateWorkflow':
+        this.applyDeactivateWorkflow(workflow, operation);
         break;
       case 'cleanStaleConnections':
         this.applyCleanStaleConnections(workflow, operation);
@@ -373,6 +397,17 @@ export class WorkflowDiffEngine {
   }
 
   private validateUpdateNode(workflow: Workflow, operation: UpdateNodeOperation): string | null {
+    // Check for common parameter mistake: "changes" instead of "updates" (Issue #392)
+    const operationAny = operation as any;
+    if (operationAny.changes && !operation.updates) {
+      return `Invalid parameter 'changes'. The updateNode operation requires 'updates' (not 'changes'). Example: {type: "updateNode", nodeId: "abc", updates: {name: "New Name", "parameters.url": "https://example.com"}}`;
+    }
+
+    // Check for missing required parameter
+    if (!operation.updates) {
+      return `Missing required parameter 'updates'. The updateNode operation requires an 'updates' object containing properties to modify. Example: {type: "updateNode", nodeId: "abc", updates: {name: "New Name"}}`;
+    }
+
     const node = this.findNode(workflow, operation.nodeId, operation.nodeName);
     if (!node) {
       return this.formatNodeNotFoundError(workflow, operation.nodeId || operation.nodeName || '', 'updateNode');
@@ -722,7 +757,8 @@ export class WorkflowDiffEngine {
     const { sourceOutput, sourceIndex } = this.resolveSmartParameters(workflow, operation);
 
     // Use nullish coalescing to properly handle explicit 0 values
-    const targetInput = operation.targetInput ?? 'main';
+    // Default targetInput to sourceOutput to preserve connection type for AI connections (ai_tool, ai_memory, etc.)
+    const targetInput = operation.targetInput ?? sourceOutput;
     const targetIndex = operation.targetIndex ?? 0;
 
     // Initialize source node connections object
@@ -826,10 +862,14 @@ export class WorkflowDiffEngine {
 
   // Metadata operation appliers
   private applyUpdateSettings(workflow: Workflow, operation: UpdateSettingsOperation): void {
-    if (!workflow.settings) {
-      workflow.settings = {};
+    // Only create/update settings if operation provides actual properties
+    // This prevents creating empty settings objects that would be rejected by n8n API
+    if (operation.settings && Object.keys(operation.settings).length > 0) {
+      if (!workflow.settings) {
+        workflow.settings = {};
+      }
+      Object.assign(workflow.settings, operation.settings);
     }
-    Object.assign(workflow.settings, operation.settings);
   }
 
   private applyUpdateName(workflow: Workflow, operation: UpdateNameOperation): void {
@@ -847,11 +887,44 @@ export class WorkflowDiffEngine {
 
   private applyRemoveTag(workflow: Workflow, operation: RemoveTagOperation): void {
     if (!workflow.tags) return;
-    
+
     const index = workflow.tags.indexOf(operation.tag);
     if (index !== -1) {
       workflow.tags.splice(index, 1);
     }
+  }
+
+  // Workflow activation operation validators
+  private validateActivateWorkflow(workflow: Workflow, operation: ActivateWorkflowOperation): string | null {
+    // Check if workflow has at least one activatable trigger
+    // NOTE: Since n8n 2.0, executeWorkflowTrigger is activatable and MUST be activated to work
+    const activatableTriggers = workflow.nodes.filter(
+      node => !node.disabled && isActivatableTrigger(node.type)
+    );
+
+    if (activatableTriggers.length === 0) {
+      return 'Cannot activate workflow: No activatable trigger nodes found. Workflows must have at least one enabled trigger node (webhook, schedule, executeWorkflowTrigger, etc.).';
+    }
+
+    return null;
+  }
+
+  private validateDeactivateWorkflow(workflow: Workflow, operation: DeactivateWorkflowOperation): string | null {
+    // Deactivation is always valid - any workflow can be deactivated
+    return null;
+  }
+
+  // Workflow activation operation appliers
+  private applyActivateWorkflow(workflow: Workflow, operation: ActivateWorkflowOperation): void {
+    // Set flag in workflow object to indicate activation intent
+    // The handler will call the API method after workflow update
+    (workflow as any)._shouldActivate = true;
+  }
+
+  private applyDeactivateWorkflow(workflow: Workflow, operation: DeactivateWorkflowOperation): void {
+    // Set flag in workflow object to indicate deactivation intent
+    // The handler will call the API method after workflow update
+    (workflow as any)._shouldDeactivate = true;
   }
 
   // Connection cleanup operation validators

@@ -20,10 +20,10 @@ export const n8nCreateWorkflowDoc: ToolDocumentation = {
     parameters: {
       name: { type: 'string', required: true, description: 'Workflow name' },
       nodes: { type: 'array', required: true, description: 'Array of nodes with id, name, type, typeVersion, position, parameters' },
-      connections: { type: 'object', required: true, description: 'Node connections. Keys are source node IDs' },
+      connections: { type: 'object', required: true, description: 'Node connections. Keys are source node names (not IDs)' },
       settings: { type: 'object', description: 'Optional workflow settings (timezone, error handling, etc.)' }
     },
-    returns: 'Created workflow object with id, name, nodes, connections, active status',
+    returns: 'Minimal summary (id, name, active, nodeCount) for token efficiency. Use n8n_get_workflow with mode "structure" to verify current state if needed.',
     examples: [
       `// Basic webhook to Slack workflow
 n8n_create_workflow({
@@ -55,8 +55,8 @@ n8n_create_workflow({
     }
   ],
   connections: {
-    "webhook_1": {
-      "main": [[{node: "slack_1", type: "main", index: 0}]]
+    "Webhook": {
+      "main": [[{node: "Slack", type: "main", index: 0}]]
     }
   }
 })`,
@@ -84,7 +84,7 @@ n8n_create_workflow({
       'Validate with validate_workflow first',
       'Use unique node IDs',
       'Position nodes for readability',
-      'Test with n8n_trigger_webhook_workflow'
+      'Test with n8n_test_workflow'
     ],
     pitfalls: [
       '**REQUIRES N8N_API_URL and N8N_API_KEY environment variables** - tool unavailable without n8n API access',
@@ -95,6 +95,6 @@ n8n_create_workflow({
       '**Auto-sanitization runs on creation**: All nodes sanitized before workflow created (operator structures fixed, missing metadata added)',
       '**Auto-sanitization cannot prevent all failures**: Broken connections or invalid node configurations may still cause creation to fail'
     ],
-    relatedTools: ['validate_workflow', 'n8n_update_partial_workflow', 'n8n_trigger_webhook_workflow']
+    relatedTools: ['validate_workflow', 'n8n_update_partial_workflow', 'n8n_test_workflow']
   }
 };

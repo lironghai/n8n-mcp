@@ -4,11 +4,13 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
   name: 'n8n_update_partial_workflow',
   category: 'workflow_management',
   essentials: {
-    description: 'Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, moveNode, enable/disableNode, addConnection, removeConnection, rewireConnection, cleanStaleConnections, replaceConnections, updateSettings, updateName, add/removeTag. Supports smart parameters (branch, case) for multi-output nodes. Full support for AI connections (ai_languageModel, ai_tool, ai_memory, ai_embedding, ai_vectorStore, ai_document, ai_textSplitter, ai_outputParser).',
+    description: 'Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, moveNode, enable/disableNode, addConnection, removeConnection, rewireConnection, cleanStaleConnections, replaceConnections, updateSettings, updateName, add/removeTag, activateWorkflow, deactivateWorkflow. Supports smart parameters (branch, case) for multi-output nodes. Full support for AI connections (ai_languageModel, ai_tool, ai_memory, ai_embedding, ai_vectorStore, ai_document, ai_textSplitter, ai_outputParser).',
     keyParameters: ['id', 'operations', 'continueOnError'],
     example: 'n8n_update_partial_workflow({id: "wf_123", operations: [{type: "rewireConnection", source: "IF", from: "Old", to: "New", branch: "true"}]})',
     performance: 'Fast (50-200ms)',
     tips: [
+      'ALWAYS provide intent parameter describing what you\'re doing (e.g., "Add error handling", "Fix webhook URL", "Connect Slack to error output")',
+      'DON\'T use generic intent like "update workflow" or "partial update" - be specific about your goal',
       'Use rewireConnection to change connection targets',
       'Use branch="true"/"false" for IF nodes',
       'Use case=N for Switch nodes',
@@ -19,11 +21,12 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
       'For AI connections, specify sourceOutput type (ai_languageModel, ai_tool, etc.)',
       'Batch AI component connections for atomic updates',
       'Auto-sanitization: ALL nodes auto-fixed during updates (operator structures, missing metadata)',
-      'Node renames automatically update all connection references - no manual connection operations needed'
+      'Node renames automatically update all connection references - no manual connection operations needed',
+      'Activate/deactivate workflows: Use activateWorkflow/deactivateWorkflow operations (requires activatable triggers like webhook/schedule)'
     ]
   },
   full: {
-    description: `Updates workflows using surgical diff operations instead of full replacement. Supports 15 operation types for precise modifications. Operations are validated and applied atomically by default - all succeed or none are applied.
+    description: `Updates workflows using surgical diff operations instead of full replacement. Supports 17 operation types for precise modifications. Operations are validated and applied atomically by default - all succeed or none are applied.
 
 ## Available Operations:
 
@@ -47,6 +50,10 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
 - **updateName**: Rename the workflow
 - **addTag**: Add a workflow tag
 - **removeTag**: Remove a workflow tag
+
+### Workflow Activation Operations (2 types):
+- **activateWorkflow**: Activate the workflow to enable automatic execution via triggers
+- **deactivateWorkflow**: Deactivate the workflow to prevent automatic execution
 
 ## Smart Parameters for Multi-Output Nodes
 
@@ -83,7 +90,6 @@ Full support for all 8 AI connection types used in n8n AI workflows:
 
 **Important Notes**:
 - **AI nodes do NOT require main connections**: Nodes like OpenAI Chat Model, Postgres Chat Memory, Embeddings OpenAI, and Supabase Vector Store use AI-specific connection types exclusively. They should ONLY have connections like \`ai_languageModel\`, \`ai_memory\`, \`ai_embedding\`, or \`ai_tool\` - NOT \`main\` connections.
-- **Fixed in v2.21.1**: Validation now correctly recognizes AI nodes that only have AI-specific connections without requiring \`main\` connections (resolves issue #357).
 
 **Best Practices**:
 - Always specify \`sourceOutput\` for AI connections (defaults to "main" if omitted)
@@ -303,10 +309,12 @@ n8n_update_partial_workflow({
         description: 'Array of diff operations. Each must have "type" field and operation-specific properties. Nodes can be referenced by ID or name.'
       },
       validateOnly: { type: 'boolean', description: 'If true, only validate operations without applying them' },
-      continueOnError: { type: 'boolean', description: 'If true, apply valid operations even if some fail (best-effort mode). Returns applied and failed operation indices. Default: false (atomic)' }
+      continueOnError: { type: 'boolean', description: 'If true, apply valid operations even if some fail (best-effort mode). Returns applied and failed operation indices. Default: false (atomic)' },
+      intent: { type: 'string', description: 'Intent of the change - helps to return better response. Include in every tool call. Example: "Add error handling for API failures".' }
     },
-    returns: 'Updated workflow object or validation results if validateOnly=true',
+    returns: 'Minimal summary (id, name, active, nodeCount, operationsApplied) for token efficiency. Use n8n_get_workflow with mode "structure" to verify current state if needed. Returns validation results if validateOnly=true.',
     examples: [
+      '// Include intent parameter for better responses\nn8n_update_partial_workflow({id: "abc", intent: "Add error handling for API failures", operations: [{type: "addConnection", source: "HTTP Request", target: "Error Handler"}]})',
       '// Add a basic node (minimal configuration)\nn8n_update_partial_workflow({id: "abc", operations: [{type: "addNode", node: {name: "Process Data", type: "n8n-nodes-base.set", position: [400, 300], parameters: {}}}]})',
       '// Add node with full configuration\nn8n_update_partial_workflow({id: "def", operations: [{type: "addNode", node: {name: "Send Slack Alert", type: "n8n-nodes-base.slack", position: [600, 300], typeVersion: 2, parameters: {resource: "message", operation: "post", channel: "#alerts", text: "Success!"}}}]})',
       '// Add node AND connect it (common pattern)\nn8n_update_partial_workflow({id: "ghi", operations: [\n  {type: "addNode", node: {name: "HTTP Request", type: "n8n-nodes-base.httpRequest", position: [400, 300], parameters: {url: "https://api.example.com", method: "GET"}}},\n  {type: "addConnection", source: "Webhook", target: "HTTP Request"}\n]})',
@@ -359,6 +367,7 @@ n8n_update_partial_workflow({
     ],
     performance: 'Very fast - typically 50-200ms. Much faster than full updates as only changes are processed.',
     bestPractices: [
+      'Always include intent parameter with specific description (e.g., "Add error handling to HTTP Request node", "Fix authentication flow", "Connect Slack notification to errors"). Avoid generic phrases like "update workflow" or "partial update"',
       'Use rewireConnection instead of remove+add for changing targets',
       'Use branch="true"/"false" for IF nodes instead of sourceIndex',
       'Use case=N for Switch nodes instead of sourceIndex',

@@ -62,6 +62,7 @@ export const workflowSettingsSchema = z.object({
   executionTimeout: z.number().optional(),
   errorWorkflow: z.string().optional(),
   callerPolicy: z.enum(['any', 'workflowsFromSameOwner', 'workflowsFromAList']).optional(),
+  availableInMCP: z.boolean().optional(),
 });
 
 // Default settings for workflow creation
@@ -103,7 +104,8 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
   } = workflow;
 
   // Ensure settings are present with defaults
-  if (!cleanedWorkflow.settings) {
+  // Treat empty settings object {} the same as missing settings
+  if (!cleanedWorkflow.settings || Object.keys(cleanedWorkflow.settings).length === 0) {
     cleanedWorkflow.settings = defaultWorkflowSettings;
   }
 
@@ -114,63 +116,47 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
  * Clean workflow data for update operations.
  *
  * This function removes read-only and computed fields that should not be sent
- * in API update requests. It does NOT add any default values or new fields.
+ * in API update requests. It filters settings to known API-accepted properties
+ * to prevent "additional properties" errors.
  *
- * Note: Unlike cleanWorkflowForCreate, this function does not add default settings.
- * The n8n API will reject update requests that include properties not present in
- * the original workflow ("settings must NOT have additional properties" error).
- *
- * Settings are filtered to only include whitelisted properties to prevent API
- * errors when workflows from n8n contain UI-only or deprecated properties.
+ * NOTE: This function filters settings to ALL known properties (12 total).
+ * For version-specific filtering (compatibility with older n8n versions),
+ * use N8nApiClient.updateWorkflow() which automatically detects the n8n version
+ * and filters settings accordingly.
  *
  * @param workflow - The workflow object to clean
  * @returns A cleaned partial workflow suitable for API updates
  */
 export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   const {
-    // Remove read-only/computed fields
+    // Remove ALL read-only/computed fields (comprehensive list)
     id,
     createdAt,
     updatedAt,
     versionId,
-    versionCounter, // Added: n8n 1.118.1+ returns this but rejects it in updates
+    versionCounter,
     meta,
     staticData,
-    // Remove fields that cause API errors
     pinData,
     tags,
-    // Remove additional fields that n8n API doesn't accept
+    description,
     isArchived,
     usedCredentials,
     sharedWithProjects,
     triggerCount,
     shared,
     active,
+    activeVersionId,
+    activeVersion,
     // Keep everything else
     ...cleanedWorkflow
   } = workflow as any;
 
-  // CRITICAL FIX for Issue #248:
-  // The n8n API has version-specific behavior for settings in workflow updates:
-  //
-  // PROBLEM:
-  // - Some versions reject updates with settings properties (community forum reports)
-  // - Cloud versions REQUIRE settings property to be present (n8n.estyl.team)
-  // - Properties like callerPolicy cause "additional properties" errors
-  //
-  // SOLUTION:
-  // - Filter settings to only include whitelisted properties (OpenAPI spec)
-  // - If no settings provided, use empty object {} for safety
-  // - Empty object satisfies "required property" validation (cloud API)
-  // - Whitelisted properties prevent "additional properties" errors
-  //
-  // References:
-  // - https://community.n8n.io/t/api-workflow-update-endpoint-doesnt-support-setting-callerpolicy/161916
-  // - OpenAPI spec: workflowSettings schema
-  // - Tested on n8n.estyl.team (cloud) and localhost (self-hosted)
-
-  // Whitelisted settings properties from n8n OpenAPI spec
-  const safeSettingsProperties = [
+  // ALL known settings properties accepted by n8n Public API (as of n8n 1.119.0+)
+  // This list is the UNION of all properties ever accepted by any n8n version
+  // Version-specific filtering is handled by N8nApiClient.updateWorkflow()
+  const ALL_KNOWN_SETTINGS_PROPERTIES = new Set([
+    // Core properties (all versions)
     'saveExecutionProgress',
     'saveManualExecutions',
     'saveDataErrorExecution',
@@ -178,21 +164,34 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
     'executionTimeout',
     'errorWorkflow',
     'timezone',
-    'executionOrder'
-  ];
+    // Added in n8n 1.37.0
+    'executionOrder',
+    // Added in n8n 1.119.0
+    'callerPolicy',
+    'callerIds',
+    'timeSavedPerExecution',
+    'availableInMCP',
+  ]);
 
   if (cleanedWorkflow.settings && typeof cleanedWorkflow.settings === 'object') {
-    // Filter to only safe properties
-    const filteredSettings: any = {};
-    for (const key of safeSettingsProperties) {
-      if (key in cleanedWorkflow.settings) {
-        filteredSettings[key] = (cleanedWorkflow.settings as any)[key];
+    // Filter to only known properties (security + prevent garbage)
+    const filteredSettings: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(cleanedWorkflow.settings)) {
+      if (ALL_KNOWN_SETTINGS_PROPERTIES.has(key)) {
+        filteredSettings[key] = value;
       }
     }
-    cleanedWorkflow.settings = filteredSettings;
+    // If no valid properties remain after filtering, use minimal defaults
+    // Issue #431: n8n API rejects empty settings objects
+    if (Object.keys(filteredSettings).length > 0) {
+      cleanedWorkflow.settings = filteredSettings;
+    } else {
+      // Minimal valid settings - executionOrder v1 is the modern default
+      cleanedWorkflow.settings = { executionOrder: 'v1' as const };
+    }
   } else {
-    // No settings provided - use empty object for safety
-    cleanedWorkflow.settings = {};
+    // No settings provided - use minimal valid defaults
+    cleanedWorkflow.settings = { executionOrder: 'v1' as const };
   }
 
   return cleanedWorkflow;
@@ -249,23 +248,32 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
       const connectedNodes = new Set<string>();
 
       // Collect all nodes that appear in connections (as source or target)
+      // Check ALL connection types, not just 'main' - AI workflows use ai_tool, ai_languageModel, etc.
+      const ALL_CONNECTION_TYPES = ['main', 'error', 'ai_tool', 'ai_languageModel', 'ai_memory', 'ai_embedding', 'ai_vectorStore'] as const;
+
       Object.entries(workflow.connections).forEach(([sourceName, connection]) => {
         connectedNodes.add(sourceName); // Node has outgoing connection
 
-        if (connection.main && Array.isArray(connection.main)) {
-          connection.main.forEach((outputs) => {
-            if (Array.isArray(outputs)) {
-              outputs.forEach((target) => {
-                connectedNodes.add(target.node); // Node has incoming connection
-              });
-            }
-          });
-        }
+        // Check all connection types for target nodes
+        ALL_CONNECTION_TYPES.forEach(connType => {
+          const connData = (connection as Record<string, unknown>)[connType];
+          if (connData && Array.isArray(connData)) {
+            connData.forEach((outputs) => {
+              if (Array.isArray(outputs)) {
+                outputs.forEach((target: { node: string }) => {
+                  if (target?.node) {
+                    connectedNodes.add(target.node); // Node has incoming connection
+                  }
+                });
+              }
+            });
+          }
+        });
       });
 
       // Find disconnected nodes (excluding non-executable nodes and triggers)
       // Non-executable nodes (sticky notes) are UI-only and don't need connections
-      // Trigger nodes only need outgoing connections
+      // Trigger nodes need either outgoing connections OR inbound AI connections (for mcpTrigger)
       const disconnectedNodes = workflow.nodes.filter(node => {
         // Skip non-executable nodes (sticky notes, etc.) - they're UI-only annotations
         if (isNonExecutableNode(node.type)) {
@@ -275,9 +283,12 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
         const isConnected = connectedNodes.has(node.name);
         const isNodeTrigger = isTriggerNode(node.type);
 
-        // Trigger nodes only need outgoing connections
+        // Trigger nodes need outgoing connections OR inbound connections (for mcpTrigger)
+        // mcpTrigger is special: it has "trigger" in its name but only receives inbound ai_tool connections
         if (isNodeTrigger) {
-          return !workflow.connections?.[node.name]; // Disconnected if no outgoing connections
+          const hasOutgoingConnections = !!workflow.connections?.[node.name];
+          const hasInboundConnections = isConnected;
+          return !hasOutgoingConnections && !hasInboundConnections; // Disconnected if NEITHER
         }
 
         // Regular nodes need at least one connection (incoming or outgoing)
@@ -332,24 +343,16 @@ export function validateWorkflowStructure(workflow: Partial<Workflow>): string[]
   }
 
   // Validate active workflows have activatable triggers
-  // Issue #351: executeWorkflowTrigger cannot activate a workflow
-  // It can only be invoked by other workflows
+  // NOTE: Since n8n 2.0, executeWorkflowTrigger is now activatable and MUST be activated to work
   if ((workflow as any).active === true && workflow.nodes && workflow.nodes.length > 0) {
     const activatableTriggers = workflow.nodes.filter(node =>
       !node.disabled && isActivatableTrigger(node.type)
     );
 
-    const executeWorkflowTriggers = workflow.nodes.filter(node =>
-      !node.disabled && node.type.toLowerCase().includes('executeworkflow')
-    );
-
-    if (activatableTriggers.length === 0 && executeWorkflowTriggers.length > 0) {
-      // Workflow is active but only has executeWorkflowTrigger nodes
-      const triggerNames = executeWorkflowTriggers.map(n => n.name).join(', ');
+    if (activatableTriggers.length === 0) {
       errors.push(
-        `Cannot activate workflow with only Execute Workflow Trigger nodes (${triggerNames}). ` +
-        'Execute Workflow Trigger can only be invoked by other workflows, not activated. ' +
-        'Either deactivate the workflow or add a webhook/schedule/polling trigger.'
+        'Cannot activate workflow: No activatable trigger nodes found. ' +
+        'Workflows must have at least one enabled trigger node (webhook, schedule, executeWorkflowTrigger, etc.).'
       );
     }
   }
