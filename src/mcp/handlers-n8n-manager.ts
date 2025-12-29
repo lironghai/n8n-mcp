@@ -402,6 +402,7 @@ const listWorkflowsSchema = z.object({
   tags: z.array(z.string()).optional(),
   projectId: z.string().optional(),
   excludePinnedData: z.boolean().optional(),
+  name: z.string().optional(),
 });
 
 const validateWorkflowSchema = z.object({
@@ -931,8 +932,14 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       ? input.tags.join(',')
       : undefined;
 
+    // When name filter is provided, we need to fetch more data first, then filter and apply limit
+    // Otherwise the limit is applied before filtering, causing fewer results than expected
+    const hasNameFilter = !!input.name;
+    const userLimit = input.limit || 100;
+    
     const response = await client.listWorkflows({
-      limit: input.limit || 100,
+      // When filtering by name, fetch max to ensure we get enough matches
+      limit: hasNameFilter ? 100 : userLimit,
       cursor: input.cursor,
       active: input.active,
       tags: tagsParam as any,  // API expects string, not array
@@ -941,7 +948,7 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
     });
     
     // Strip down workflows to only essential metadata
-    const minimalWorkflows = response.data.map(workflow => ({
+    let minimalWorkflows = response.data.map(workflow => ({
       id: workflow.id,
       name: workflow.name,
       active: workflow.active,
@@ -951,6 +958,20 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       tags: workflow.tags || [],
       nodeCount: workflow.nodes?.length || 0
     }));
+    
+    // Apply name fuzzy filter (case-insensitive)
+    if (input.name) {
+      const nameLower = input.name.toLowerCase();
+      minimalWorkflows = minimalWorkflows.filter(workflow => 
+        workflow.name.toLowerCase().includes(nameLower)
+      );
+    }
+    
+    // Apply user's limit after filtering
+    const hasMoreAfterLimit = minimalWorkflows.length > userLimit;
+    if (minimalWorkflows.length > userLimit) {
+      minimalWorkflows = minimalWorkflows.slice(0, userLimit);
+    }
 
     return {
       success: true,
@@ -958,9 +979,9 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
         workflows: minimalWorkflows,
         returned: minimalWorkflows.length,
         nextCursor: response.nextCursor,
-        hasMore: !!response.nextCursor,
-        ...(response.nextCursor ? { 
-          _note: "More workflows available. Use cursor to get next page." 
+        hasMore: !!response.nextCursor || hasMoreAfterLimit,
+        ...(response.nextCursor || hasMoreAfterLimit ? { 
+          _note: "More workflows available. Use cursor to get next page or increase limit." 
         } : {})
       }
     };

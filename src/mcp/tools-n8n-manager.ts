@@ -197,6 +197,10 @@ export const n8nManagementTools: ToolDefinition[] = [
         excludePinnedData: { 
           type: 'boolean', 
           description: 'Exclude pinned data from response (default: true)' 
+        },
+        name: { 
+          type: 'string', 
+          description: 'Filter by workflow name (case-insensitive fuzzy match)' 
         }
       }
     }

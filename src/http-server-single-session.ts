@@ -1031,7 +1031,9 @@ export class SingleSessionHTTPServer {
         logger.info('Terminating session via DELETE request', { sessionId: mcpSessionId });
         try {
           await this.removeSession(mcpSessionId, 'manual_termination');
-          res.status(204).send(); // No content
+          // Use 200 OK with empty JSON instead of 204 for MCP Inspector compatibility
+          // Some clients have issues with 204 No Content response
+          res.status(200).json({ success: true });
         } catch (error) {
           logger.error('Error terminating session:', error);
           res.status(500).json({
@@ -1044,14 +1046,11 @@ export class SingleSessionHTTPServer {
           });
         }
       } else {
-        res.status(404).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32001,
-            message: 'Session not found'
-          },
-          id: null
-        });
+        // Session not found - return success anyway for idempotent DELETE
+        // This follows REST best practices: deleting a non-existent resource should succeed
+        // This prevents errors when session was already cleaned up by timeout or other means
+        logger.debug('Session not found for DELETE request, returning success for idempotency', { sessionId: mcpSessionId });
+        res.status(200).json({ success: true });
       }
     });
 
@@ -1059,9 +1058,17 @@ export class SingleSessionHTTPServer {
     // SECURITY: Rate limiting for authentication endpoint
     // Prevents brute force attacks and DoS
     // See: https://github.com/czlonkowski/n8n-mcp/issues/265 (HIGH-02)
+    // Can be disabled via DISABLE_RATE_LIMIT=true environment variable
+    const rateLimitDisabled = process.env.DISABLE_RATE_LIMIT === 'true';
+    
+    if (rateLimitDisabled) {
+      logger.warn('Rate limiting is DISABLED via DISABLE_RATE_LIMIT environment variable');
+    }
+    
     const authLimiter = rateLimit({
       windowMs: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW || '900000'), // 15 minutes
       max: parseInt(process.env.AUTH_RATE_LIMIT_MAX || '20'), // 20 authentication attempts per IP
+      skip: () => rateLimitDisabled, // Skip rate limiting when disabled
       message: {
         jsonrpc: '2.0',
         error: {
@@ -1070,7 +1077,7 @@ export class SingleSessionHTTPServer {
         },
         id: null
       },
-      standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
+      standardHeaders: !rateLimitDisabled, // Return rate limit info in `RateLimit-*` headers (only when enabled)
       legacyHeaders: false, // Disable `X-RateLimit-*` headers
       handler: (req, res) => {
         logger.warn('Rate limit exceeded', {
