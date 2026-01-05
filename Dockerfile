@@ -55,7 +55,8 @@ COPY .env.example ./
 COPY docker/docker-entrypoint.sh /usr/local/bin/
 COPY docker/parse-config.js /app/docker/
 COPY docker/n8n-mcp /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/n8n-mcp
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/bin/n8n-mcp && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/n8n-mcp
 
 # Add container labels
 LABEL org.opencontainers.image.source="https://github.com/czlonkowski/n8n-mcp"
@@ -77,6 +78,12 @@ USER nodejs
 
 # Set Docker environment flag
 ENV IS_DOCKER=true
+ENV MCP_MODE=http
+ENV LOG_LEVEL=error
+ENV DISABLE_CONSOLE_OUTPUT=true
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV DISABLE_RATE_LIMIT=true
 
 # Telemetry: Anonymous usage statistics are ENABLED by default
 # To opt-out, uncomment the following line:
