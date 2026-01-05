@@ -399,6 +399,7 @@ const updateWorkflowSchema = z.object({
 const listWorkflowsSchema = z.object({
   limit: z.number().min(1).max(100).optional(),
   cursor: z.string().optional(),
+  name: z.string().optional(),
   active: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   projectId: z.string().optional(),
@@ -1007,6 +1008,7 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
     const response = await client.listWorkflows({
       limit: input.limit || 100,
       cursor: input.cursor,
+      name: input.name,
       active: input.active,
       tags: tagsParam as any,  // API expects string, not array
       projectId: input.projectId,
@@ -1022,7 +1024,8 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       createdAt: workflow.createdAt,
       updatedAt: workflow.updatedAt,
       tags: workflow.tags || [],
-      nodeCount: workflow.nodes?.length || 0
+      nodeCount: workflow.nodes?.length || 0,
+      desc: workflow.nodes.filter(node => node.type === 'n8n-nodes-base.stickyNote' && node?.parameters?.content).map(node => node?.parameters?.content).join('; ')
     }));
 
     return {

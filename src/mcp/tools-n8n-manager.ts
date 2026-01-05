@@ -209,6 +209,10 @@ export const n8nManagementTools: ToolDefinition[] = [
           type: 'string', 
           description: 'Pagination cursor from previous response' 
         },
+        name: {
+          type: 'string',
+          description: 'Filter by workflow name (case-insensitive fuzzy match)'
+        },
         active: { 
           type: 'boolean', 
           description: 'Filter by active status' 

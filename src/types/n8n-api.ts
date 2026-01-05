@@ -277,6 +277,7 @@ export interface N8nSettingsResponse {
 export interface WorkflowListParams {
   limit?: number;
   cursor?: string;
+  name?: string;
   active?: boolean;
   tags?: string | null;  // Comma-separated string per n8n API spec
   projectId?: string;
