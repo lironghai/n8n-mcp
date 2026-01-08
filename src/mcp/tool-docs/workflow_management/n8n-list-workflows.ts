@@ -5,13 +5,14 @@ export const n8nListWorkflowsDoc: ToolDocumentation = {
   category: 'workflow_management',
   essentials: {
     description: 'List workflows (minimal metadata only - no nodes/connections). Supports pagination via cursor.',
-    keyParameters: ['limit', 'active', 'tags'],
-    example: 'n8n_list_workflows({limit: 20, active: true})',
+    keyParameters: ['limit', 'active', 'tags', 'name'],
+    example: 'n8n_list_workflows({limit: 20, active: true, name: "email"})',
     performance: 'Fast (100-300ms)',
     tips: [
       'Use cursor for pagination',
       'Filter by active status',
-      'Tag filtering for organization'
+      'Tag filtering for organization',
+      'Use name for fuzzy search by workflow name'
     ]
   },
   full: {
@@ -22,13 +23,15 @@ export const n8nListWorkflowsDoc: ToolDocumentation = {
       active: { type: 'boolean', description: 'Filter by active/inactive status' },
       tags: { type: 'array', description: 'Filter by exact tag matches (AND logic)' },
       projectId: { type: 'string', description: 'Filter by project ID (enterprise feature)' },
-      excludePinnedData: { type: 'boolean', description: 'Exclude pinned data from response (default: true)' }
+      excludePinnedData: { type: 'boolean', description: 'Exclude pinned data from response (default: true)' },
+      name: { type: 'string', description: 'Filter by workflow name (case-insensitive fuzzy match)' }
     },
     returns: 'Object with: workflows array (minimal fields: id, name, active, createdAt, updatedAt, tags, nodeCount), returned (count in this response), hasMore (boolean), nextCursor (for pagination), and _note (guidance when more data exists)',
     examples: [
       'n8n_list_workflows({limit: 20}) - First 20 workflows',
       'n8n_list_workflows({active: true, tags: ["production"]}) - Active production workflows',
-      'n8n_list_workflows({cursor: "abc123", limit: 50}) - Next page of results'
+      'n8n_list_workflows({cursor: "abc123", limit: 50}) - Next page of results',
+      'n8n_list_workflows({name: "email"}) - Workflows with "email" in their name'
     ],
     useCases: [
       'Build workflow dashboards',

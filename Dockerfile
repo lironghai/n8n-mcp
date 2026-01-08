@@ -52,6 +52,7 @@ COPY src/database/schema-optimized.sql ./src/database/
 COPY .env.example ./
 
 # Copy entrypoint script, config parser, and n8n-mcp command
+# Use sed to convert Windows CRLF to Unix LF line endings (fixes "no such file or directory" error)
 COPY docker/docker-entrypoint.sh /usr/local/bin/
 COPY docker/parse-config.js /app/docker/
 COPY docker/n8n-mcp /usr/local/bin/

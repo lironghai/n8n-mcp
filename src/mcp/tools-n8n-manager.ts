@@ -676,20 +676,20 @@ export const n8nManagementTools: ToolDefinition[] = [
             required: ['name', 'type', 'data']
         }
     },
-    {
-        name: 'n8n_get_credential',
-        description: `Get credential metadata. NOTE: Does NOT return sensitive credential data (passwords, tokens). Only returns id, name, type, timestamps.`,
-        inputSchema: {
-            type: 'object',
-            properties: {
-                id: {
-                    type: 'string',
-                    description: 'Credential ID'
-                }
-            },
-            required: ['id']
-        }
-    },
+    // {
+    //     name: 'n8n_get_credential',
+    //     description: `Get credential metadata. NOTE: Does NOT return sensitive credential data (passwords, tokens). Only returns id, name, type, timestamps.`,
+    //     inputSchema: {
+    //         type: 'object',
+    //         properties: {
+    //             id: {
+    //                 type: 'string',
+    //                 description: 'Credential ID'
+    //             }
+    //         },
+    //         required: ['id']
+    //     }
+    // },
     {
         name: 'n8n_delete_credential',
         description: `Delete a credential. WARNING: This will break workflows using this credential. Use with caution.`,
