@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { N8nApiClient } from '@/services/n8n-api-client';
 import { WorkflowValidator } from '@/services/workflow-validator';
 import { NodeRepository } from '@/database/node-repository';
+import { WorkflowDiffEngine } from '@/services/workflow-diff-engine';
+import { WorkflowVersioningService } from '@/services/workflow-versioning-service';
 import {
   N8nApiError,
   N8nAuthenticationError,
@@ -16,6 +18,8 @@ import { ExecutionStatus } from '@/types/n8n-api';
 vi.mock('@/services/n8n-api-client');
 vi.mock('@/services/workflow-validator');
 vi.mock('@/database/node-repository');
+vi.mock('@/services/workflow-diff-engine');
+vi.mock('@/services/workflow-versioning-service');
 vi.mock('@/config/n8n-api', () => ({
   getN8nApiConfig: vi.fn()
 }));
@@ -49,6 +53,8 @@ describe('handlers-n8n-manager', () => {
   let mockApiClient: any;
   let mockRepository: any;
   let mockValidator: any;
+  let mockDiffEngine: any;
+  let mockVersioningService: any;
   let handlers: any;
   let getN8nApiConfig: any;
   let n8nValidation: any;
@@ -113,6 +119,20 @@ describe('handlers-n8n-manager', () => {
       validateWorkflow: vi.fn(),
     };
 
+    // Setup mock diff engine
+    mockDiffEngine = {
+      applyDiff: vi.fn(),
+    };
+
+    // Setup mock versioning service
+    mockVersioningService = {
+      createBackup: vi.fn().mockResolvedValue({
+        versionId: 1,
+        versionNumber: 1,
+        pruned: 0,
+      }),
+    };
+
     // Import mocked modules
     getN8nApiConfig = (await import('@/config/n8n-api')).getN8nApiConfig;
     n8nValidation = await import('@/services/n8n-validation');
@@ -138,6 +158,12 @@ describe('handlers-n8n-manager', () => {
 
     // Mock NodeRepository constructor
     vi.mocked(NodeRepository).mockImplementation(() => mockRepository);
+
+    // Mock WorkflowDiffEngine constructor
+    vi.mocked(WorkflowDiffEngine).mockImplementation(() => mockDiffEngine);
+
+    // Mock WorkflowVersioningService constructor
+    vi.mocked(WorkflowVersioningService).mockImplementation(() => mockVersioningService);
 
     // Import handlers module after setting up mocks
     handlers = await import('@/mcp/handlers-n8n-manager');
@@ -1310,6 +1336,641 @@ describe('handlers-n8n-manager', () => {
       });
 
       expect(result.error).toMatch(/mode:\s*'preview'/);
+    });
+  });
+
+  describe('handleManageWorkflowNodes', () => {
+    it('should add node successfully', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {
+          url: 'https://api.example.com',
+          method: 'GET',
+        },
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [...testWorkflow.nodes, { ...newNode, id: 'node2' }],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        id: 'test-workflow-id',
+        operation: 'add',
+        nodeCount: 2,
+      });
+      expect(mockDiffEngine.applyDiff).toHaveBeenCalled();
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalled();
+    });
+
+    it('should remove node successfully', async () => {
+      const testWorkflow = createTestWorkflow({
+        nodes: [
+          {
+            id: 'node1',
+            name: 'Start',
+            type: 'n8n-nodes-base.start',
+            typeVersion: 1,
+            position: [100, 100],
+            parameters: {},
+          },
+          {
+            id: 'node2',
+            name: 'HTTP Request',
+            type: 'n8n-nodes-base.httpRequest',
+            typeVersion: 4.1,
+            position: [250, 300],
+            parameters: {},
+          },
+        ],
+      });
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [testWorkflow.nodes[0]],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'remove',
+          nodeId: 'node2',
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        id: 'test-workflow-id',
+        operation: 'remove',
+        nodeCount: 1,
+      });
+      expect(mockDiffEngine.applyDiff).toHaveBeenCalled();
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalled();
+    });
+
+    it('should remove node by name', async () => {
+      const testWorkflow = createTestWorkflow({
+        nodes: [
+          {
+            id: 'node1',
+            name: 'Start',
+            type: 'n8n-nodes-base.start',
+            typeVersion: 1,
+            position: [100, 100],
+            parameters: {},
+          },
+          {
+            id: 'node2',
+            name: 'HTTP Request',
+            type: 'n8n-nodes-base.httpRequest',
+            typeVersion: 4.1,
+            position: [250, 300],
+            parameters: {},
+          },
+        ],
+      });
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [testWorkflow.nodes[0]],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'remove',
+          nodeName: 'HTTP Request',
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data.nodeCount).toBe(1);
+    });
+
+    it('should handle missing node object for add operation', async () => {
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Node object is required for "add" operation');
+    });
+
+    it('should handle missing nodeId/nodeName for remove operation', async () => {
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'remove',
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Either nodeId or nodeName is required for "remove" operation');
+    });
+
+    it('should handle invalid input', async () => {
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'invalid',
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid input');
+    });
+
+    it('should handle workflow validation errors', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {},
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [...testWorkflow.nodes, { ...newNode, id: 'node2' }],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([
+        'Invalid workflow structure',
+      ]);
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Workflow validation failed after node operation');
+    });
+
+    it('should handle diff engine failures', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {},
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: false,
+        errors: [{ operation: 0, message: 'Node already exists' }],
+        warnings: [],
+      });
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Failed to add node');
+    });
+
+    it('should create backup by default', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {},
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [...testWorkflow.nodes, { ...newNode, id: 'node2' }],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+        },
+        mockRepository
+      );
+
+      expect(mockVersioningService.createBackup).toHaveBeenCalled();
+    });
+
+    it('should skip backup when createBackup is false', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {},
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        nodes: [...testWorkflow.nodes, { ...newNode, id: 'node2' }],
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updatedWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+          createBackup: false,
+        },
+        mockRepository
+      );
+
+      expect(mockVersioningService.createBackup).not.toHaveBeenCalled();
+    });
+
+    it('should handle API errors', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newNode = {
+        name: 'HTTP Request',
+        type: 'n8n-nodes-base.httpRequest',
+        typeVersion: 4.1,
+        position: [250, 300] as [number, number],
+        parameters: {},
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: testWorkflow,
+        operationsApplied: 1,
+        message: 'Success',
+        errors: [],
+        warnings: [],
+      });
+      mockApiClient.updateWorkflow.mockRejectedValue(
+        new N8nServerError('Update failed')
+      );
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleManageWorkflowNodes(
+        {
+          id: 'test-workflow-id',
+          operation: 'add',
+          node: newNode,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Update failed');
+    });
+  });
+
+  describe('handleUpdateWorkflowConnections', () => {
+    it('should update connections successfully', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newConnections = {
+        Start: {
+          main: [[{ node: 'HTTP Request', type: 'main', index: 0 }]],
+        },
+        'HTTP Request': {
+          main: [[{ node: 'Set', type: 'main', index: 0 }]],
+        },
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        connections: newConnections,
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: newConnections,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data).toMatchObject({
+        id: 'test-workflow-id',
+        name: 'Test Workflow',
+      });
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledWith(
+        'test-workflow-id',
+        { connections: newConnections }
+      );
+    });
+
+    it('should validate workflow structure before update', async () => {
+      const testWorkflow = createTestWorkflow();
+      const invalidConnections = {
+        'NonExistentNode': {
+          main: [[{ node: 'AnotherNonExistent', type: 'main', index: 0 }]],
+        },
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([
+        'Node "NonExistentNode" not found in workflow',
+      ]);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: invalidConnections,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Workflow validation failed');
+      expect(mockApiClient.updateWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('should handle invalid input', async () => {
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          // Missing connections
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid input');
+    });
+
+    it('should create backup by default', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newConnections = {
+        Start: {
+          main: [[{ node: 'HTTP Request', type: 'main', index: 0 }]],
+        },
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        connections: newConnections,
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: newConnections,
+        },
+        mockRepository
+      );
+
+      expect(mockVersioningService.createBackup).toHaveBeenCalled();
+    });
+
+    it('should skip backup when createBackup is false', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newConnections = {
+        Start: {
+          main: [[{ node: 'HTTP Request', type: 'main', index: 0 }]],
+        },
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        connections: newConnections,
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: newConnections,
+          createBackup: false,
+        },
+        mockRepository
+      );
+
+      expect(mockVersioningService.createBackup).not.toHaveBeenCalled();
+    });
+
+    it('should handle API errors', async () => {
+      const testWorkflow = createTestWorkflow();
+      const newConnections = {
+        Start: {
+          main: [[{ node: 'HTTP Request', type: 'main', index: 0 }]],
+        },
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockRejectedValue(
+        new N8nServerError('Update failed')
+      );
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: newConnections,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Update failed');
+    });
+
+    it('should handle not found errors', async () => {
+      const notFoundError = new N8nNotFoundError('Workflow', 'non-existent');
+      mockApiClient.getWorkflow.mockRejectedValue(notFoundError);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'non-existent',
+          connections: {},
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not found');
+      expect(result.code).toBe('NOT_FOUND');
+    });
+
+    it('should support empty connections object', async () => {
+      const testWorkflow = createTestWorkflow();
+      const emptyConnections = {};
+      const updatedWorkflow = {
+        ...testWorkflow,
+        connections: emptyConnections,
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: emptyConnections,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledWith(
+        'test-workflow-id',
+        { connections: emptyConnections }
+      );
+    });
+
+    it('should support AI connection types', async () => {
+      const testWorkflow = createTestWorkflow({
+        nodes: [
+          {
+            id: 'node1',
+            name: 'OpenAI',
+            type: '@n8n/n8n-nodes-langchain.lmChatOpenAI',
+            typeVersion: 1,
+            position: [100, 100],
+            parameters: {},
+          },
+          {
+            id: 'node2',
+            name: 'AI Agent',
+            type: '@n8n/n8n-nodes-langchain.agent',
+            typeVersion: 1,
+            position: [300, 100],
+            parameters: {},
+          },
+        ],
+      });
+      const aiConnections = {
+        OpenAI: {
+          ai_languageModel: [[{ node: 'AI Agent', type: 'ai_languageModel', index: 0 }]],
+        },
+      };
+      const updatedWorkflow = {
+        ...testWorkflow,
+        connections: aiConnections,
+      };
+
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+      vi.mocked(n8nValidation.validateWorkflowStructure).mockReturnValue([]);
+
+      const result = await handlers.handleUpdateWorkflowConnections(
+        {
+          id: 'test-workflow-id',
+          connections: aiConnections,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledWith(
+        'test-workflow-id',
+        { connections: aiConnections }
+      );
     });
   });
 });

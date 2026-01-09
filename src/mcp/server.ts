@@ -1231,6 +1231,16 @@ export class N8NDocumentationMCPServer {
       case 'n8n_update_partial_workflow':
         this.validateToolParams(name, args, ['id', 'operations']);
         return handleUpdatePartialWorkflow(args, this.repository!, this.instanceContext);
+      case 'n8n_manage_workflow_nodes':
+        this.validateToolParams(name, args, ['id', 'operation']);
+        await this.ensureInitialized();
+        if (!this.repository) throw new Error('Repository not initialized');
+        return n8nHandlers.handleManageWorkflowNodes(args, this.repository, this.instanceContext);
+      case 'n8n_update_workflow_connections':
+        this.validateToolParams(name, args, ['id', 'connections']);
+        await this.ensureInitialized();
+        if (!this.repository) throw new Error('Repository not initialized');
+        return n8nHandlers.handleUpdateWorkflowConnections(args, this.repository, this.instanceContext);
       case 'n8n_delete_workflow':
         this.validateToolParams(name, args, ['id']);
         return n8nHandlers.handleDeleteWorkflow(args, this.instanceContext);

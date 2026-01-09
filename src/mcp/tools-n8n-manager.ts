@@ -180,6 +180,117 @@ export const n8nManagementTools: ToolDefinition[] = [
     },
   },
   {
+    name: 'n8n_manage_workflow_nodes',
+    description: `Add, remove, or update nodes in a workflow. Supports: "add" to add a new node, "remove" to remove a node by ID or name (automatically cleans up connections), "update" to update an existing node by ID (replaces node configuration).`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { 
+          type: 'string', 
+          description: 'Workflow ID to update' 
+        },
+        operation: {
+          type: 'string',
+          enum: ['add', 'remove', 'update'],
+          description: 'Operation type: "add" to add a node, "remove" to remove a node, "update" to update a node by ID'
+        },
+        node: {
+          type: 'object',
+          description: 'Node object (required for "add" and "update" operations). Must include: name, type, position, and parameters. Same format as n8n_create_workflow nodes.',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            typeVersion: { type: 'number' },
+            position: {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 2,
+              maxItems: 2
+            },
+            parameters: { type: 'object' },
+            credentials: { type: 'object' },
+            disabled: { type: 'boolean' },
+            notes: { type: 'string' },
+            continueOnFail: { type: 'boolean' },
+            retryOnFail: { type: 'boolean' },
+            maxTries: { type: 'number' },
+            waitBetweenTries: { type: 'number' }
+          }
+        },
+        nodeId: {
+          type: 'string',
+          description: 'Node ID (required for "update" operation, optional for "remove" operation - can use either nodeId or nodeName)'
+        },
+        nodeName: {
+          type: 'string',
+          description: 'Node name (optional for "remove" operation - can use either nodeId or nodeName)'
+        },
+        createBackup: {
+          type: 'boolean',
+          description: 'Create backup before update (default: true)'
+        },
+        intent: {
+          type: 'string',
+          description: 'User intent description for telemetry'
+        }
+      },
+      required: ['id', 'operation']
+    },
+    annotations: {
+      title: 'Manage Workflow Nodes',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'n8n_update_workflow_connections',
+    description: `Update workflow connections with three operation modes: "full" (default) replaces entire connections, "append" adds/merges new connections with existing ones, "del" removes specified connections. Use n8n_get_workflow with mode 'structure' to get current connections before updating. append与del模式是以节点为单位全量增加与删除，若节点存在多条连接线删除其中一条连接线需要先删除节点全部连接线再使用append增加节点链接线`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { 
+          type: 'string', 
+          description: 'Workflow ID to update' 
+        },
+        operation: {
+          type: 'string',
+          enum: ['full', 'append', 'del'],
+          default: 'full',
+          description: `Operation type: 
+- "full" (default): 删除原有工作流的全部连接线，替换为您提供的connections对象。当您想要完全替换所有连接时使用。请提供与n8n_create_workflow格式匹配的完整connections对象.
+- "append": Merge new connections with existing ones. New connections are added to existing connections. If a connection already exists, it will be merged (new connections added to the same source node/output). Use when adding new connections without removing existing ones.
+- "del": Remove specified connections. Only connections specified in the connections parameter will be removed. Other connections remain unchanged. Use when you want to remove specific connections while keeping others.`
+        },
+        connections: { 
+          type: 'object', 
+          description: `Connections object. Format depends on operation type:
+- For "full": Complete connections object. Keys are source node names, values define output connections. Same format as n8n_create_workflow connections parameter. Example: {"Node1": {"main": [[{node: "Node2", type: "main", index: 0}]]}}
+- For "append": New connections to add. Will be merged with existing connections. Example: {"Node3": {"main": [[{node: "Node4", type: "main", index: 0}]]}} - this adds Node3→Node4 connection while keeping existing connections.
+- For "del": Connections to remove. Specify the exact connections you want to delete. Example: {"Node1": {"main": [[{node: "Node2", type: "main", index: 0}]]}} - this removes Node1→Node2 connection.`
+        },
+        createBackup: {
+          type: 'boolean',
+          description: 'Create backup before update (default: true)'
+        },
+        intent: {
+          type: 'string',
+          description: 'User intent description for telemetry'
+        }
+      },
+      required: ['id', 'connections']
+    },
+    annotations: {
+      title: 'Update Workflow Connections',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
     name: 'n8n_delete_workflow',
     description: `Permanently delete a workflow. This action cannot be undone.`,
     inputSchema: {
