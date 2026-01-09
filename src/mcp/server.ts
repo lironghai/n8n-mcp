@@ -588,7 +588,7 @@ export class N8NDocumentationMCPServer {
         const totalAvailableTools = n8nDocumentationToolsFinal.length + (shouldIncludeManagementTools ? n8nManagementTools.length : 0);
         logger.debug(`Filtered ${disabledTools.size} disabled tools, ${tools.length}/${totalAvailableTools} tools available`);
       }
-      
+
       // Check if client is n8n (from initialization)
       const clientInfo = this.clientInfo;
       const isN8nClient = clientInfo?.name?.includes('n8n') || 
@@ -902,10 +902,28 @@ export class N8NDocumentationMCPServer {
       case 'n8n_get_workflow':
       case 'n8n_update_full_workflow':
       case 'n8n_delete_workflow':
+      case 'n8n_activate_workflow':
+      case 'n8n_deactivate_workflow':
       case 'n8n_validate_workflow':
       case 'n8n_autofix_workflow':
+      case 'n8n_get_credential':
+      case 'n8n_delete_credential':
         validationResult = ToolValidation.validateWorkflowId(args);
         break;
+      case 'n8n_get_tag':
+      case 'n8n_update_tag':
+      case 'n8n_delete_tag':
+          // Validate tag ID is provided
+          if (!(args as any)?.id || (args as any).id.trim() === '') {
+              throw new ValidationError('Tag ID is required');
+          }
+          break;
+      case 'n8n_update_workflow_tags':
+          // Validate workflow ID is provided
+          if (!(args as any)?.workflowId || (args as any).workflowId.trim() === '') {
+              throw new ValidationError('Workflow ID is required');
+          }
+          break;
       case 'n8n_executions':
         // Requires action parameter, id validation done in handler based on action
         validationResult = args.action
@@ -923,7 +941,7 @@ export class N8NDocumentationMCPServer {
         return this.validateToolParamsBasic(toolName, args, legacyRequiredParams || []);
       }
       
-      if (!validationResult.valid) {
+      if (validationResult && !validationResult.valid) {
         const errorMessage = Validator.formatErrors(validationResult, toolName);
         logger.error(`Parameter validation failed for ${toolName}:`, errorMessage);
         throw new ValidationError(errorMessage);
@@ -1220,9 +1238,25 @@ export class N8NDocumentationMCPServer {
       case 'n8n_update_partial_workflow':
         this.validateToolParams(name, args, ['id', 'operations']);
         return handleUpdatePartialWorkflow(args, this.repository!, this.instanceContext);
+      case 'n8n_manage_workflow_nodes':
+        this.validateToolParams(name, args, ['id', 'operation']);
+        await this.ensureInitialized();
+        if (!this.repository) throw new Error('Repository not initialized');
+        return n8nHandlers.handleManageWorkflowNodes(args, this.repository, this.instanceContext);
+      case 'n8n_update_workflow_connections':
+        this.validateToolParams(name, args, ['id', 'connections']);
+        await this.ensureInitialized();
+        if (!this.repository) throw new Error('Repository not initialized');
+        return n8nHandlers.handleUpdateWorkflowConnections(args, this.repository, this.instanceContext);
       case 'n8n_delete_workflow':
         this.validateToolParams(name, args, ['id']);
         return n8nHandlers.handleDeleteWorkflow(args, this.instanceContext);
+      case 'n8n_activate_workflow':
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleActivateWorkflow(args, this.instanceContext);
+      case 'n8n_deactivate_workflow':
+        this.validateToolParams(name, args, ['id']);
+        return n8nHandlers.handleDeactivateWorkflow(args, this.instanceContext);
       case 'n8n_list_workflows':
         // No required parameters
         return n8nHandlers.handleListWorkflows(args, this.instanceContext);
@@ -1259,7 +1293,58 @@ export class N8NDocumentationMCPServer {
             throw new Error(`Unknown action: ${execAction}. Valid actions: get, list, delete`);
         }
       }
-      case 'n8n_health_check':
+
+        // Credential Management
+        case 'n8n_create_credential':
+            this.validateToolParams(name, args, ['name', 'type', 'data']);
+            return n8nHandlers.handleCreateCredential(args, this.instanceContext);
+        case 'n8n_get_credential':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleGetCredential(args, this.instanceContext);
+        case 'n8n_delete_credential':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleDeleteCredential(args, this.instanceContext);
+        case 'n8n_get_credential_schema':
+            this.validateToolParams(name, args, ['credentialTypeName']);
+            return n8nHandlers.handleGetCredentialSchema(args, this.instanceContext);
+
+        // Tag Management
+        case 'n8n_create_tag':
+            this.validateToolParams(name, args, ['name']);
+            return n8nHandlers.handleCreateTag(args, this.instanceContext);
+        case 'n8n_list_tags':
+            // No required parameters
+            return n8nHandlers.handleListTags(args, this.instanceContext);
+        case 'n8n_get_tag':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleGetTag(args, this.instanceContext);
+        case 'n8n_update_tag':
+            this.validateToolParams(name, args, ['id', 'name']);
+            return n8nHandlers.handleUpdateTag(args, this.instanceContext);
+        case 'n8n_delete_tag':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleDeleteTag(args, this.instanceContext);
+        case 'n8n_update_workflow_tags':
+            this.validateToolParams(name, args, ['workflowId', 'tagIds']);
+            return n8nHandlers.handleUpdateWorkflowTags(args, this.instanceContext);
+
+        // Variable Management
+        case 'n8n_create_variable':
+            this.validateToolParams(name, args, ['key', 'value']);
+            return n8nHandlers.handleCreateVariable(args, this.instanceContext);
+        case 'n8n_list_variables':
+            // No required parameters
+            return n8nHandlers.handleListVariables(args, this.instanceContext);
+        case 'n8n_get_variable':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleGetVariable(args, this.instanceContext);
+        case 'n8n_update_variable':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleUpdateVariable(args, this.instanceContext);
+        case 'n8n_delete_variable':
+            this.validateToolParams(name, args, ['id']);
+            return n8nHandlers.handleDeleteVariable(args, this.instanceContext);
+        case 'n8n_health_check':
         // No required parameters - supports mode='status' (default) or mode='diagnostic'
         if (args.mode === 'diagnostic') {
           return n8nHandlers.handleDiagnostic({ params: { arguments: args } }, this.instanceContext);

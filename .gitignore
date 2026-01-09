@@ -16,6 +16,7 @@ lerna-debug.log*
 
 # Build output
 dist/
+dist/*
 build/
 out/
 .next/
@@ -140,3 +141,4 @@ n8n-mcp-wrapper.sh
 
 # Telemetry configuration (user-specific)
 ~/.n8n-mcp/
+/dist/

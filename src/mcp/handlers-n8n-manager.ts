@@ -8,7 +8,8 @@ import {
   WebhookRequest,
   McpToolResponse,
   ExecutionFilterOptions,
-  ExecutionMode
+  ExecutionMode,
+  Variable
 } from '../types/n8n-api';
 import type { TriggerType, TestWorkflowInput } from '../triggers/types';
 import {
@@ -398,6 +399,7 @@ const updateWorkflowSchema = z.object({
 const listWorkflowsSchema = z.object({
   limit: z.number().min(1).max(100).optional(),
   cursor: z.string().optional(),
+  name: z.string().optional(),
   active: z.boolean().optional(),
   tags: z.array(z.string()).optional(),
   projectId: z.string().optional(),
@@ -881,6 +883,540 @@ async function trackWorkflowMutationForFullUpdate(data: any): Promise<void> {
   }
 }
 
+export async function handleManageWorkflowNodes(
+  args: unknown,
+  repository: NodeRepository,
+  context?: InstanceContext
+): Promise<McpToolResponse> {
+  const startTime = Date.now();
+  const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  let workflowBefore: any = null;
+  let userIntent = 'Manage workflow nodes';
+
+  try {
+    const client = ensureApiConfigured(context);
+    
+    // Define schema for node management
+    const nodeObjectSchema = z.object({
+      id: z.string().optional(),
+      name: z.string().optional(),
+      type: z.string().optional(),
+      typeVersion: z.number().optional(),
+      position: z.tuple([z.number(), z.number()]).optional(),
+      parameters: z.record(z.any()).optional(),
+      credentials: z.record(z.any()).optional(),
+      disabled: z.boolean().optional(),
+      notes: z.string().optional(),
+      notesInFlow: z.boolean().optional(),
+      continueOnFail: z.boolean().optional(),
+      onError: z.enum(['continueRegularOutput', 'continueErrorOutput', 'stopWorkflow']).optional(),
+      retryOnFail: z.boolean().optional(),
+      maxTries: z.number().optional(),
+      waitBetweenTries: z.number().optional(),
+      alwaysOutputData: z.boolean().optional(),
+      executeOnce: z.boolean().optional(),
+    });
+
+    // Base schema with common fields
+    const baseSchema = z.object({
+      id: z.string(),
+      operation: z.enum(['add', 'remove', 'update']),
+      createBackup: z.boolean().optional(),
+      intent: z.string().optional(),
+    });
+
+    // Use superRefine to validate based on operation type
+    const manageNodesSchema = baseSchema.extend({
+      node: nodeObjectSchema.optional(),
+      nodeId: z.string().optional(),
+      nodeName: z.string().optional(),
+    }).superRefine((data, ctx) => {
+      if (data.operation === 'add') {
+        if (!data.node) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Node object is required for "add" operation',
+            path: ['node'],
+          });
+        }
+      } else if (data.operation === 'remove') {
+        if (!data.nodeId && !data.nodeName) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Either nodeId or nodeName is required for "remove" operation',
+            path: ['nodeId'],
+          });
+        }
+      } else if (data.operation === 'update') {
+        if (!data.nodeId) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'NodeId is required for "update" operation',
+            path: ['nodeId'],
+          });
+        }
+        if (!data.node) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'Node object is required for "update" operation',
+            path: ['node'],
+          });
+        }
+      }
+    });
+
+    const input = manageNodesSchema.parse(args);
+    
+    // Set user intent based on operation
+    if (input.operation === 'add') {
+      userIntent = input.intent || 'Add node to workflow';
+    } else if (input.operation === 'remove') {
+      userIntent = input.intent || 'Remove node from workflow';
+    } else {
+      userIntent = input.intent || 'Update node in workflow';
+    }
+
+    // Fetch current workflow
+    const current = await client.getWorkflow(input.id);
+    workflowBefore = JSON.parse(JSON.stringify(current));
+
+    // Create backup before modifying workflow (default: true)
+    if (input.createBackup !== false) {
+      try {
+        const versioningService = new WorkflowVersioningService(repository, client);
+        const backupResult = await versioningService.createBackup(input.id, current, {
+          trigger: 'partial_update'
+        });
+
+        logger.info('Workflow backup created', {
+          workflowId: input.id,
+          versionId: backupResult.versionId,
+          versionNumber: backupResult.versionNumber,
+          pruned: backupResult.pruned
+        });
+      } catch (error: any) {
+        logger.warn('Failed to create workflow backup', {
+          workflowId: input.id,
+          error: error.message
+        });
+        // Continue with update even if backup fails (non-blocking)
+      }
+    }
+
+    // Use WorkflowDiffEngine to apply the operation
+    const { WorkflowDiffEngine } = await import('../services/workflow-diff-engine.js');
+    const diffEngine = new WorkflowDiffEngine();
+    
+    // Prepare operation based on type
+    let operation: any;
+    if (input.operation === 'add') {
+      operation = {
+        type: 'addNode',
+        node: input.node
+      };
+    } else if (input.operation === 'remove') {
+      operation = {
+        type: 'removeNode',
+        nodeId: input.nodeId,
+        nodeName: input.nodeName
+      };
+    } else if (input.operation === 'update') {
+      // For update, we need to find the node first and then update it
+      const existingNode = current.nodes.find((n: any) => n.id === input.nodeId);
+      if (!existingNode) {
+        return {
+          success: false,
+          error: `Node with ID "${input.nodeId}" not found in workflow`
+        };
+      }
+      
+      // Build updates object from input.node, excluding id (which is preserved via nodeId)
+      // The updateNode operation will handle nested objects like parameters and credentials
+      const { id: _, ...updates } = input.node!;
+      
+      operation = {
+        type: 'updateNode',
+        nodeId: input.nodeId,
+        updates
+      };
+    }
+
+    // Apply the operation
+    const diffRequest = {
+      id: input.id,
+      operations: [operation],
+      validateOnly: false,
+      continueOnError: false
+    };
+
+    const diffResult = await diffEngine.applyDiff(current, diffRequest);
+
+    if (!diffResult.success) {
+      return {
+        success: false,
+        error: `Failed to ${input.operation} node`,
+        details: {
+          errors: diffResult.errors,
+          warnings: diffResult.warnings
+        }
+      };
+    }
+
+    // Validate final workflow structure
+    if (diffResult.workflow) {
+      const structureErrors = validateWorkflowStructure(diffResult.workflow);
+      if (structureErrors.length > 0) {
+        logger.info('Workflow validation failed after node operation:', structureErrors);
+        // return {
+        //   success: false,
+        //   error: 'Workflow validation failed after node operation',
+        //   details: {
+        //     errors: structureErrors,
+        //     errorCount: structureErrors.length
+        //   }
+        // };
+      }
+    }
+
+    // Update workflow via API
+    const updatedWorkflow = await client.updateWorkflow(input.id, diffResult.workflow!);
+
+    // Track successful mutation
+    trackWorkflowMutationForFullUpdate({
+      sessionId,
+      toolName: 'n8n_manage_workflow_nodes',
+      userIntent,
+      operations: [operation],
+      workflowBefore,
+      workflowAfter: updatedWorkflow,
+      mutationSuccess: true,
+      durationMs: Date.now() - startTime,
+    }).catch(err => {
+      logger.warn('Failed to track mutation telemetry:', err);
+    });
+
+    return {
+      success: true,
+      data: {
+        id: updatedWorkflow.id,
+        name: updatedWorkflow.name,
+        active: updatedWorkflow.active,
+        nodeCount: updatedWorkflow.nodes?.length || 0,
+        operation: input.operation
+      },
+      message: `Node ${input.operation === 'add' ? 'added' : input.operation === 'remove' ? 'removed' : 'updated'} successfully. Workflow now has ${updatedWorkflow.nodes?.length || 0} nodes.`
+    };
+  } catch (error) {
+    // Track failed mutation
+    if (workflowBefore) {
+      trackWorkflowMutationForFullUpdate({
+        sessionId,
+        toolName: 'n8n_manage_workflow_nodes',
+        userIntent,
+        operations: [],
+        workflowBefore,
+        workflowAfter: workflowBefore,
+        mutationSuccess: false,
+        mutationError: error instanceof Error ? error.message : 'Unknown error',
+        durationMs: Date.now() - startTime,
+      }).catch(err => {
+        logger.warn('Failed to track mutation telemetry for failed operation:', err);
+      });
+    }
+
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code,
+        details: error.details as Record<string, unknown> | undefined
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+export async function handleUpdateWorkflowConnections(
+  args: unknown,
+  repository: NodeRepository,
+  context?: InstanceContext
+): Promise<McpToolResponse> {
+  const startTime = Date.now();
+  const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  let workflowBefore: any = null;
+  let userIntent = 'Update workflow connections';
+
+  try {
+    const client = ensureApiConfigured(context);
+    
+    // Define schema for connections update
+    const updateConnectionsSchema = z.object({
+      id: z.string(),
+      operation: z.enum(['full', 'append', 'del']).default('full'),
+      connections: z.record(z.any()),
+      createBackup: z.boolean().optional(),
+      intent: z.string().optional(),
+    });
+
+    const input = updateConnectionsSchema.parse(args);
+    
+    // Set user intent based on operation
+    if (input.intent) {
+      userIntent = input.intent;
+    } else {
+      switch (input.operation) {
+        case 'full':
+          userIntent = 'Replace all workflow connections';
+          break;
+        case 'append':
+          userIntent = 'Append new connections to workflow';
+          break;
+        case 'del':
+          userIntent = 'Remove connections from workflow';
+          break;
+        default:
+          userIntent = 'Update workflow connections';
+      }
+    }
+
+    // Fetch current workflow
+    const current = await client.getWorkflow(input.id);
+    workflowBefore = JSON.parse(JSON.stringify(current));
+
+    // Create backup before modifying workflow (default: true)
+    if (input.createBackup !== false) {
+      try {
+        const versioningService = new WorkflowVersioningService(repository, client);
+        const backupResult = await versioningService.createBackup(input.id, current, {
+          trigger: 'partial_update'
+        });
+
+        logger.info('Workflow backup created', {
+          workflowId: input.id,
+          versionId: backupResult.versionId,
+          versionNumber: backupResult.versionNumber,
+          pruned: backupResult.pruned
+        });
+      } catch (error: any) {
+        logger.warn('Failed to create workflow backup', {
+          workflowId: input.id,
+          error: error.message
+        });
+        // Continue with update even if backup fails (non-blocking)
+      }
+    }
+
+    // Process connections based on operation type
+    let finalConnections: any;
+    
+    if (input.operation === 'full') {
+      // Full replacement: use connections as-is
+      finalConnections = input.connections;
+    } else if (input.operation === 'append') {
+      // Append: merge new connections with existing ones
+      finalConnections = JSON.parse(JSON.stringify(current.connections || {}));
+      
+      // Merge new connections into existing ones
+      Object.entries(input.connections).forEach(([sourceNode, outputs]) => {
+        if (!finalConnections[sourceNode]) {
+          finalConnections[sourceNode] = {};
+        }
+        
+        // Merge output types (main, error, ai_*, etc.)
+        Object.entries(outputs as any).forEach(([outputType, connectionsArray]) => {
+          if (!finalConnections[sourceNode][outputType]) {
+            finalConnections[sourceNode][outputType] = [];
+          }
+          
+          // connectionsArray is Array<Array<{node, type, index}>>
+          const existingOutputs = finalConnections[sourceNode][outputType] as any[][];
+          const newOutputs = connectionsArray as any[][];
+          
+          // Merge arrays: extend existing arrays or add new ones
+          newOutputs.forEach((newConnections, sourceIndex) => {
+            // Ensure we have enough slots
+            while (existingOutputs.length <= sourceIndex) {
+              existingOutputs.push([]);
+            }
+            
+            // Append new connections to the existing slot
+            if (Array.isArray(newConnections)) {
+              existingOutputs[sourceIndex] = [
+                ...(existingOutputs[sourceIndex] || []),
+                ...newConnections
+              ];
+            }
+          });
+        });
+      });
+    } else if (input.operation === 'del') {
+      // Delete: remove specified connections from existing ones
+      finalConnections = JSON.parse(JSON.stringify(current.connections || {}));
+      
+      // Remove specified connections
+      Object.entries(input.connections).forEach(([sourceNode, outputs]) => {
+        if (!finalConnections[sourceNode]) {
+          return; // Source node doesn't exist, skip
+        }
+        
+        // Process each output type
+        Object.entries(outputs as any).forEach(([outputType, connectionsToRemove]) => {
+          if (!finalConnections[sourceNode][outputType]) {
+            return; // Output type doesn't exist, skip
+          }
+          
+          const existingOutputs = finalConnections[sourceNode][outputType] as any[][];
+          const removeOutputs = connectionsToRemove as any[][];
+          
+          // For each sourceIndex in removeOutputs, remove matching connections
+          removeOutputs.forEach((connectionsToRemoveAtIndex, sourceIndex) => {
+            if (sourceIndex >= existingOutputs.length) {
+              return; // Source index doesn't exist
+            }
+            
+            const existingConnections = existingOutputs[sourceIndex];
+            if (!Array.isArray(existingConnections) || !Array.isArray(connectionsToRemoveAtIndex)) {
+              return;
+            }
+            
+            // Remove connections that match the ones to delete
+            // Match by node name, type, and index
+            existingOutputs[sourceIndex] = existingConnections.filter(existingConn => {
+              return !connectionsToRemoveAtIndex.some(removeConn => {
+                return existingConn.node === removeConn.node &&
+                       existingConn.type === removeConn.type &&
+                       existingConn.index === removeConn.index;
+              });
+            });
+          });
+          
+          // Clean up empty arrays
+          // Remove trailing empty arrays
+          while (existingOutputs.length > 0 && 
+                 existingOutputs[existingOutputs.length - 1].length === 0) {
+            existingOutputs.pop();
+          }
+          
+          // Remove output type if empty
+          if (existingOutputs.length === 0) {
+            delete finalConnections[sourceNode][outputType];
+          }
+        });
+        
+        // Remove source node if it has no connections
+        if (Object.keys(finalConnections[sourceNode]).length === 0) {
+          delete finalConnections[sourceNode];
+        }
+      });
+    } else {
+      // Fallback to full (should not happen due to schema validation)
+      finalConnections = input.connections;
+    }
+
+    // Build full workflow with updated connections
+    // n8n API requires complete workflow data (nodes + connections) for updates
+    const fullWorkflow = {
+      ...current,
+      connections: finalConnections
+    };
+
+    // Validate workflow structure (n8n API expects FULL form: n8n-nodes-base.*)
+    const errors = validateWorkflowStructure(fullWorkflow);
+    if (errors.length > 0) {
+      logger.info('Workflow validation failed:', errors);
+      // return {
+      //   success: false,
+      //   error: 'Workflow validation failed',
+      //   details: { errors }
+      // };
+    }
+
+    // Update workflow via API - n8n API requires complete workflow data
+    // Must include nodes array along with connections for the update to work
+    const workflow = await client.updateWorkflow(input.id, {
+      name: current.name,
+      nodes: current.nodes,  // Required: n8n API needs complete nodes array
+      connections: finalConnections
+    });
+
+    // Track successful mutation
+    trackWorkflowMutationForFullUpdate({
+      sessionId,
+      toolName: 'n8n_update_workflow_connections',
+      userIntent,
+      operations: [],
+      workflowBefore,
+      workflowAfter: workflow,
+      mutationSuccess: true,
+      durationMs: Date.now() - startTime,
+    }).catch(err => {
+      logger.warn('Failed to track mutation telemetry:', err);
+    });
+
+    return {
+      success: true,
+      data: {
+        id: workflow.id,
+        name: workflow.name,
+        active: workflow.active,
+        nodeCount: workflow.nodes?.length || 0
+      },
+      message: `Workflow connections ${input.operation === 'full' ? 'replaced' : input.operation === 'append' ? 'appended' : 'removed'} successfully. Use n8n_get_workflow with mode 'structure' to verify current connections.`
+    };
+  } catch (error) {
+    // Track failed mutation
+    if (workflowBefore) {
+      trackWorkflowMutationForFullUpdate({
+        sessionId,
+        toolName: 'n8n_update_workflow_connections',
+        userIntent,
+        operations: [],
+        workflowBefore,
+        workflowAfter: workflowBefore,
+        mutationSuccess: false,
+        mutationError: error instanceof Error ? error.message : 'Unknown error',
+        durationMs: Date.now() - startTime,
+      }).catch(err => {
+        logger.warn('Failed to track mutation telemetry for failed operation:', err);
+      });
+    }
+
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code,
+        details: error.details as Record<string, unknown> | undefined
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
 export async function handleDeleteWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
   try {
     const client = ensureApiConfigured(context);
@@ -921,6 +1457,78 @@ export async function handleDeleteWorkflow(args: unknown, context?: InstanceCont
   }
 }
 
+export async function handleActivateWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id } = z.object({ id: z.string() }).parse(args);
+
+    const workflow = await client.activateWorkflow(id);
+
+    return {
+      success: true,
+      data: workflow,
+      message: `Workflow ${id} (${workflow.name}) activated successfully`
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+export async function handleDeactivateWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id } = z.object({ id: z.string() }).parse(args);
+
+    const workflow = await client.deactivateWorkflow(id);
+
+    return {
+      success: true,
+      data: workflow,
+      message: `Workflow ${id} (${workflow.name}) deactivated successfully`
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
 export async function handleListWorkflows(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
   try {
     const client = ensureApiConfigured(context);
@@ -934,6 +1542,7 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
     const response = await client.listWorkflows({
       limit: input.limit || 100,
       cursor: input.cursor,
+      name: input.name,
       active: input.active,
       tags: tagsParam as any,  // API expects string, not array
       projectId: input.projectId,
@@ -941,7 +1550,7 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
     });
     
     // Strip down workflows to only essential metadata
-    const minimalWorkflows = response.data.map(workflow => ({
+    let minimalWorkflows = response.data.map(workflow => ({
       id: workflow.id,
       name: workflow.name,
       active: workflow.active,
@@ -949,7 +1558,8 @@ export async function handleListWorkflows(args: unknown, context?: InstanceConte
       createdAt: workflow.createdAt,
       updatedAt: workflow.updatedAt,
       tags: workflow.tags || [],
-      nodeCount: workflow.nodes?.length || 0
+      nodeCount: workflow.nodes?.length || 0,
+      // desc: workflow.nodes.filter(node => node.type === 'n8n-nodes-base.stickyNote' && node?.parameters?.content).map(node => node?.parameters?.content).join('\\n ')
     }));
 
     return {
@@ -1620,6 +2230,185 @@ export async function handleDeleteExecution(args: unknown, context?: InstanceCon
       };
     }
     
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+export async function handleRetryExecution(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id, loadWorkflow = true } = z.object({
+      id: z.string(),
+      loadWorkflow: z.boolean().optional().default(true)
+    }).parse(args);
+
+    const execution = await client.retryExecution(id, loadWorkflow);
+
+    return {
+      success: true,
+      message: `Execution ${id} retried successfully. New execution ID: ${execution.id}`,
+      data: {
+        newExecutionId: execution.id,
+        status: execution.status,
+        workflowId: execution.workflowId,
+        workflowName: execution.workflowName,
+        retryOf: execution.retryOf,
+        startedAt: execution.startedAt
+      }
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+// Credential Management Handlers
+
+/**
+ * Handle create credential request
+ */
+export async function handleCreateCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const schema = z.object({
+      name: z.string().min(1, 'Credential name is required'),
+      type: z.string().min(1, 'Credential type is required'),
+      data: z.record(z.any())
+    });
+
+    const validatedArgs = schema.parse(args);
+    const client = ensureApiConfigured(context);
+
+    const credential = await client.createCredential(validatedArgs);
+
+    return {
+      success: true,
+      data: {
+        id: credential.id,
+        name: credential.name,
+        type: credential.type,
+        createdAt: credential.createdAt
+      },
+      message: `Credential "${credential.name}" created successfully. ID: ${credential.id}. NOTE: Credential data is stored securely and cannot be retrieved via API.`
+    };
+  } catch (error) {
+    // Sanitize error messages to avoid exposing credential data
+    if (error instanceof Error && error.message.includes('400')) {
+      return {
+        success: false,
+        error: 'Invalid credential data. Check the credential schema for required fields.',
+        code: 'INVALID_CREDENTIAL_DATA'
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+/**
+ * Handle get credential request
+ */
+export async function handleGetCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const schema = z.object({
+      id: z.string().min(1, 'Credential ID is required')
+    });
+
+    const validatedArgs = schema.parse(args);
+    const client = ensureApiConfigured(context);
+
+    const credential = await client.getCredential(validatedArgs.id);
+
+    return {
+      success: true,
+      data: credential,
+      message: 'Retrieved credential metadata. NOTE: Sensitive data (passwords, tokens) is not included for security.'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+/**
+ * Handle delete credential request
+ */
+export async function handleDeleteCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const schema = z.object({
+      id: z.string().min(1, 'Credential ID is required')
+    });
+
+    const validatedArgs = schema.parse(args);
+    const client = ensureApiConfigured(context);
+
+    // Get credential name before deletion
+    const credential = await client.getCredential(validatedArgs.id);
+
+    await client.deleteCredential(validatedArgs.id);
+
+    return {
+      success: true,
+      data: {
+        id: validatedArgs.id,
+        name: credential.name,
+        deleted: true
+      },
+      message: `Credential "${credential.name}" (${validatedArgs.id}) deleted successfully. WARNING: Workflows using this credential will fail until updated.`
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+/**
+ * Handle get credential schema request
+ */
+export async function handleGetCredentialSchema(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const schema = z.object({
+      credentialTypeName: z.string().min(1, 'Credential type name is required')
+    });
+
+    const validatedArgs = schema.parse(args);
+    const client = ensureApiConfigured(context);
+
+    const credentialSchema = await client.getCredentialSchema(validatedArgs.credentialTypeName);
+
+    return {
+      success: true,
+      data: credentialSchema,
+      message: `Retrieved schema for credential type "${credentialSchema.displayName}"`
+    };
+  } catch (error) {
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error occurred'
@@ -2670,4 +3459,426 @@ export async function handleTriggerWebhookWorkflow(args: unknown, context?: Inst
       error: error instanceof Error ? error.message : 'Unknown error occurred'
     };
   }
+}
+
+// ========================================================================
+// Tag Management Handlers
+// ========================================================================
+
+export async function handleCreateTag(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            name: z.string().min(1, 'Tag name is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        const tag = await client.createTag({ name: validatedArgs.name });
+
+        return {
+            success: true,
+            data: tag,
+            message: `Tag "${tag.name}" created successfully. ID: ${tag.id}`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+export async function handleListTags(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const client = ensureApiConfigured(context);
+        const result = await client.listTags();
+
+        return {
+            success: true,
+            data: {
+                tags: result.data,
+                count: result.data.length
+            },
+            message: `Found ${result.data.length} tag${result.data.length !== 1 ? 's' : ''}`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+export async function handleGetTag(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Tag ID is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        const tag = await client.getTag(validatedArgs.id);
+
+        return {
+            success: true,
+            data: tag,
+            message: `Tag "${tag.name}" is used by ${tag.workflowCount || 0} workflow${tag.workflowCount !== 1 ? 's' : ''}`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+export async function handleUpdateTag(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Tag ID is required'),
+            name: z.string().min(1, 'Tag name is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        const tag = await client.updateTag(validatedArgs.id, { name: validatedArgs.name });
+
+        return {
+            success: true,
+            data: tag,
+            message: `Tag renamed to "${tag.name}"`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+export async function handleDeleteTag(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Tag ID is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        // Get tag details before deletion
+        const tag = await client.getTag(validatedArgs.id);
+
+        await client.deleteTag(validatedArgs.id);
+
+        return {
+            success: true,
+            data: {
+                id: validatedArgs.id,
+                name: tag.name,
+                deleted: true
+            },
+            message: `Tag "${tag.name}" deleted successfully. Removed from ${tag.workflowCount || 0} workflow${tag.workflowCount !== 1 ? 's' : ''}.`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+export async function handleUpdateWorkflowTags(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            workflowId: z.string().min(1, 'Workflow ID is required'),
+            tagIds: z.array(z.string())
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        // Get workflow name for better messaging
+        const workflow = await client.getWorkflow(validatedArgs.workflowId);
+
+        const result = await client.updateWorkflowTags(
+            validatedArgs.workflowId,
+            validatedArgs.tagIds
+        );
+
+        const tagNames = result.tags.map(t => t.name).join(', ');
+
+        return {
+            success: true,
+            data: result,
+            message: validatedArgs.tagIds.length > 0
+                ? `Workflow "${workflow.name}" tagged with: ${tagNames}`
+                : `All tags removed from workflow "${workflow.name}"`
+        };
+    } catch (error) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+// ========================================================================
+// Variable Management Handlers
+// ========================================================================
+
+/**
+ * Handle create variable request
+ */
+export async function handleCreateVariable(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            key: z.string().min(1, 'Variable key is required'),
+            value: z.string(),
+            projectId: z.string().optional()
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        const variable = await client.createVariable(validatedArgs);
+
+        return {
+            success: true,
+            data: variable,
+            message: `Variable "${variable.key}" created successfully. ID: ${variable.id}`
+        };
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+
+        if (error instanceof N8nApiError) {
+            return {
+                success: false,
+                error: getUserFriendlyErrorMessage(error),
+                code: error.code
+            };
+        }
+
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+/**
+ * Handle list variables request
+ */
+export async function handleListVariables(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            limit: z.number().min(1).max(100).optional(),
+            cursor: z.string().optional(),
+            projectId: z.string().optional(),
+            state: z.enum(['active', 'inactive']).optional()
+        });
+
+        const validatedArgs = schema.parse(args || {});
+        const client = ensureApiConfigured(context);
+
+        const response = await client.listVariables({
+            limit: validatedArgs.limit || 100,
+            cursor: validatedArgs.cursor,
+            projectId: validatedArgs.projectId,
+            state: validatedArgs.state
+        });
+
+        return {
+            success: true,
+            data: {
+                variables: response.data,
+                returned: response.data.length,
+                nextCursor: response.nextCursor,
+                hasMore: !!response.nextCursor,
+                ...(response.nextCursor ? {
+                    _note: "More variables available. Use cursor to get next page."
+                } : {})
+            }
+        };
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+
+        if (error instanceof N8nApiError) {
+            return {
+                success: false,
+                error: getUserFriendlyErrorMessage(error),
+                code: error.code
+            };
+        }
+
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+/**
+ * Handle get variable request
+ */
+export async function handleGetVariable(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Variable ID is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        const variable = await client.getVariable(validatedArgs.id);
+
+        return {
+            success: true,
+            data: variable,
+            message: `Retrieved variable "${variable.key}"`
+        };
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+
+        if (error instanceof N8nApiError) {
+            return {
+                success: false,
+                error: getUserFriendlyErrorMessage(error),
+                code: error.code
+            };
+        }
+
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+/**
+ * Handle update variable request
+ */
+export async function handleUpdateVariable(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Variable ID is required'),
+            key: z.string().optional(),
+            value: z.string().optional()
+        });
+
+        const validatedArgs = schema.parse(args);
+
+        // At least one field must be provided for update
+        if (!validatedArgs.key && !validatedArgs.value) {
+            return {
+                success: false,
+                error: 'At least one of key or value must be provided for update'
+            };
+        }
+
+        const client = ensureApiConfigured(context);
+
+        const updateData: Partial<Variable> = {};
+        if (validatedArgs.key) updateData.key = validatedArgs.key;
+        if (validatedArgs.value) updateData.value = validatedArgs.value;
+
+        const variable = await client.updateVariable(validatedArgs.id, updateData);
+
+        return {
+            success: true,
+            data: variable,
+            message: `Variable "${variable.key}" updated successfully`
+        };
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+
+        if (error instanceof N8nApiError) {
+            return {
+                success: false,
+                error: getUserFriendlyErrorMessage(error),
+                code: error.code
+            };
+        }
+
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+
+/**
+ * Handle delete variable request
+ */
+export async function handleDeleteVariable(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+    try {
+        const schema = z.object({
+            id: z.string().min(1, 'Variable ID is required')
+        });
+
+        const validatedArgs = schema.parse(args);
+        const client = ensureApiConfigured(context);
+
+        // Get variable details before deletion for better messaging
+        const variable = await client.getVariable(validatedArgs.id);
+
+        await client.deleteVariable(validatedArgs.id);
+
+        return {
+            success: true,
+            data: {
+                id: validatedArgs.id,
+                key: variable.key,
+                deleted: true
+            },
+            message: `Variable "${variable.key}" deleted successfully. WARNING: Workflows using this variable may fail.`
+        };
+    } catch (error) {
+        if (error instanceof z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: {errors: error.errors}
+            };
+        }
+
+        if (error instanceof N8nApiError) {
+            return {
+                success: false,
+                error: getUserFriendlyErrorMessage(error),
+                code: error.code
+            };
+        }
+
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
 }

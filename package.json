@@ -160,6 +160,8 @@
     "n8n": "^2.2.3",
     "n8n-core": "^2.2.2",
     "n8n-workflow": "^2.2.2",
+    "n8n-nodes-feishu-lark": "^0.10.0",
+    "n8n-nodes-mcp": "^0.1.33",
     "openai": "^4.77.0",
     "sql.js": "^1.13.0",
     "tslib": "^2.6.2",

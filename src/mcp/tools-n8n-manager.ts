@@ -180,6 +180,117 @@ export const n8nManagementTools: ToolDefinition[] = [
     },
   },
   {
+    name: 'n8n_manage_workflow_nodes',
+    description: `Add, remove, or update nodes in a workflow. Supports: "add" to add a new node, "remove" to remove a node by ID or name (automatically cleans up connections), "update" to update an existing node by ID (replaces node configuration).`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { 
+          type: 'string', 
+          description: 'Workflow ID to update' 
+        },
+        operation: {
+          type: 'string',
+          enum: ['add', 'remove', 'update'],
+          description: 'Operation type: "add" to add a node, "remove" to remove a node, "update" to update a node by ID'
+        },
+        node: {
+          type: 'object',
+          description: 'Node object (required for "add" and "update" operations). Must include: name, type, position, and parameters. Same format as n8n_create_workflow nodes.',
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            type: { type: 'string' },
+            typeVersion: { type: 'number' },
+            position: {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 2,
+              maxItems: 2
+            },
+            parameters: { type: 'object' },
+            credentials: { type: 'object' },
+            disabled: { type: 'boolean' },
+            notes: { type: 'string' },
+            continueOnFail: { type: 'boolean' },
+            retryOnFail: { type: 'boolean' },
+            maxTries: { type: 'number' },
+            waitBetweenTries: { type: 'number' }
+          }
+        },
+        nodeId: {
+          type: 'string',
+          description: 'Node ID (required for "update" operation, optional for "remove" operation - can use either nodeId or nodeName)'
+        },
+        nodeName: {
+          type: 'string',
+          description: 'Node name (optional for "remove" operation - can use either nodeId or nodeName)'
+        },
+        createBackup: {
+          type: 'boolean',
+          description: 'Create backup before update (default: true)'
+        },
+        intent: {
+          type: 'string',
+          description: 'User intent description for telemetry'
+        }
+      },
+      required: ['id', 'operation']
+    },
+    annotations: {
+      title: 'Manage Workflow Nodes',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'n8n_update_workflow_connections',
+    description: `Update workflow connections with three operation modes: "full" (default) replaces entire connections, "append" adds/merges new connections with existing ones, "del" removes specified connections. Use n8n_get_workflow with mode 'structure' to get current connections before updating. append与del模式是以节点为单位全量增加与删除，若节点存在多条连接线删除其中一条连接线需要先删除节点全部连接线再使用append增加节点链接线`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { 
+          type: 'string', 
+          description: 'Workflow ID to update' 
+        },
+        operation: {
+          type: 'string',
+          enum: ['full', 'append', 'del'],
+          default: 'full',
+          description: `Operation type: 
+- "full" (default): 删除原有工作流的全部连接线，替换为您提供的connections对象。当您想要完全替换所有连接时使用。请提供与n8n_create_workflow格式匹配的完整connections对象.
+- "append": Merge new connections with existing ones. New connections are added to existing connections. If a connection already exists, it will be merged (new connections added to the same source node/output). Use when adding new connections without removing existing ones.
+- "del": Remove specified connections. Only connections specified in the connections parameter will be removed. Other connections remain unchanged. Use when you want to remove specific connections while keeping others.`
+        },
+        connections: { 
+          type: 'object', 
+          description: `Connections object. Format depends on operation type:
+- For "full": Complete connections object. Keys are source node names, values define output connections. Same format as n8n_create_workflow connections parameter. Example: {"Node1": {"main": [[{node: "Node2", type: "main", index: 0}]]}}
+- For "append": New connections to add. Will be merged with existing connections. Example: {"Node3": {"main": [[{node: "Node4", type: "main", index: 0}]]}} - this adds Node3→Node4 connection while keeping existing connections.
+- For "del": Connections to remove. Specify the exact connections you want to delete. Example: {"Node1": {"main": [[{node: "Node2", type: "main", index: 0}]]}} - this removes Node1→Node2 connection.`
+        },
+        createBackup: {
+          type: 'boolean',
+          description: 'Create backup before update (default: true)'
+        },
+        intent: {
+          type: 'string',
+          description: 'User intent description for telemetry'
+        }
+      },
+      required: ['id', 'connections']
+    },
+    annotations: {
+      title: 'Update Workflow Connections',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
     name: 'n8n_delete_workflow',
     description: `Permanently delete a workflow. This action cannot be undone.`,
     inputSchema: {
@@ -200,6 +311,34 @@ export const n8nManagementTools: ToolDefinition[] = [
     },
   },
   {
+    name: 'n8n_activate_workflow',
+    description: `Activate a workflow to enable automatic execution. Workflow must have at least one enabled trigger node.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Workflow ID to activate'
+        }
+      },
+      required: ['id']
+    }
+  },
+  {
+    name: 'n8n_deactivate_workflow',
+    description: `Deactivate a workflow to prevent automatic execution. The workflow can still be executed manually.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Workflow ID to deactivate'
+        }
+      },
+      required: ['id']
+    }
+  },
+  {
     name: 'n8n_list_workflows',
     description: `List workflows (minimal metadata only). Returns id/name/active/dates/tags. Check hasMore/nextCursor for pagination.`,
     inputSchema: {
@@ -213,7 +352,11 @@ export const n8nManagementTools: ToolDefinition[] = [
           type: 'string', 
           description: 'Pagination cursor from previous response' 
         },
-        active: { 
+        name: {
+          type: 'string',
+          description: 'Filter by workflow name (case-insensitive fuzzy match)'
+        },
+        active: {
           type: 'boolean', 
           description: 'Filter by active status' 
         },
@@ -475,6 +618,24 @@ export const n8nManagementTools: ToolDefinition[] = [
       openWorldHint: true,
     },
   },
+  {
+    name: 'n8n_retry_execution',
+    description: `Retry a failed execution with the same input data. Uses n8n API's retry endpoint to re-run the workflow.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'Execution ID to retry'
+        },
+        loadWorkflow: {
+          type: 'boolean',
+          description: 'Whether to load the workflow definition (default: true)'
+        }
+      },
+      required: ['id']
+    }
+  },
 
   // System Tools
   {
@@ -602,5 +763,262 @@ export const n8nManagementTools: ToolDefinition[] = [
       destructiveHint: false,
       openWorldHint: true,
     },
-  }
+  },
+    // Credential Management Tools
+    {
+        name: 'n8n_create_credential',
+        description: `Create a new credential. WARNING: Handle credential data securely. The API returns metadata only, not the credential secrets.`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                name: {
+                    type: 'string',
+                    description: 'Credential name (must be unique)'
+                },
+                type: {
+                    type: 'string',
+                    description: 'Credential type (e.g., "httpBasicAuth", "gmailOAuth2Api"). Use n8n_get_credential_schema to see available fields.'
+                },
+                data: {
+                    type: 'object',
+                    description: 'Credential data object with type-specific fields. Structure varies by credential type.'
+                }
+            },
+            required: ['name', 'type', 'data']
+        }
+    },
+    // {
+    //     name: 'n8n_get_credential',
+    //     description: `Get credential metadata. NOTE: Does NOT return sensitive credential data (passwords, tokens). Only returns id, name, type, timestamps.`,
+    //     inputSchema: {
+    //         type: 'object',
+    //         properties: {
+    //             id: {
+    //                 type: 'string',
+    //                 description: 'Credential ID'
+    //             }
+    //         },
+    //         required: ['id']
+    //     }
+    // },
+    {
+        name: 'n8n_delete_credential',
+        description: `Delete a credential. WARNING: This will break workflows using this credential. Use with caution.`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Credential ID to delete'
+                }
+            },
+            required: ['id']
+        }
+    },
+    {
+        name: 'n8n_get_credential_schema',
+        description: `Get the schema for a credential type. Shows which fields are required and their types. Useful for building credential creation forms.`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                credentialTypeName: {
+                    type: 'string',
+                    description: 'Credential type name (e.g., "httpBasicAuth", "gmailOAuth2Api", "slackOAuth2Api")'
+                }
+            },
+            required: ['credentialTypeName']
+        }
+    },
+
+    // Tag Management Tools
+    {
+        name: 'n8n_create_tag',
+        description: 'Create a new tag for organizing workflows.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                name: {
+                    type: 'string',
+                    description: 'Tag name (must be unique)',
+                },
+            },
+            required: ['name'],
+        },
+    },
+    {
+        name: 'n8n_list_tags',
+        description: 'List all available tags with workflow counts.',
+        inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+        },
+    },
+    {
+        name: 'n8n_get_tag',
+        description: 'Get details about a specific tag including workflows using it.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Tag ID',
+                },
+            },
+            required: ['id'],
+        },
+    },
+    {
+        name: 'n8n_update_tag',
+        description: 'Update tag name. Changes apply to all workflows using this tag.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Tag ID',
+                },
+                name: {
+                    type: 'string',
+                    description: 'New tag name',
+                },
+            },
+            required: ['id', 'name'],
+        },
+    },
+    {
+        name: 'n8n_delete_tag',
+        description: 'Delete a tag. Removes tag from all workflows but does not delete the workflows.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Tag ID to delete',
+                },
+            },
+            required: ['id'],
+        },
+    },
+    {
+        name: 'n8n_update_workflow_tags',
+        description: 'Set tags for a workflow. Replaces all existing tags with the provided list.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                workflowId: {
+                    type: 'string',
+                    description: 'Workflow ID',
+                },
+                tagIds: {
+                    type: 'array',
+                    items: {
+                        type: 'string',
+                    },
+                    description: 'Array of tag IDs to assign to the workflow. Pass empty array to remove all tags.',
+                },
+            },
+            required: ['workflowId', 'tagIds'],
+        },
+    },
+
+    // Variable Management Tools
+    {
+        name: 'n8n_create_variable',
+        description: 'Create a new variable in your n8n instance. Variables store reusable data across workflows.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                key: {
+                    type: 'string',
+                    description: 'Variable key/name (must be unique)',
+                },
+                value: {
+                    type: 'string',
+                    description: 'Variable value',
+                },
+                projectId: {
+                    type: 'string',
+                    description: 'Optional project ID (enterprise feature)',
+                },
+            },
+            required: ['key', 'value'],
+        },
+    },
+    {
+        name: 'n8n_list_variables',
+        description: 'List all variables with optional filtering. Supports pagination for large sets.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                limit: {
+                    type: 'number',
+                    description: 'Number of variables to return (1-100, default: 100)',
+                },
+                cursor: {
+                    type: 'string',
+                    description: 'Pagination cursor from previous response',
+                },
+                projectId: {
+                    type: 'string',
+                    description: 'Filter by project ID (enterprise feature)',
+                },
+                state: {
+                    type: 'string',
+                    enum: ['active', 'inactive'],
+                    description: 'Filter by state',
+                },
+            },
+        },
+    },
+    {
+        name: 'n8n_get_variable',
+        description: 'Get a specific variable by ID. Returns key, value, and metadata.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Variable ID',
+                },
+            },
+            required: ['id'],
+        },
+    },
+    {
+        name: 'n8n_update_variable',
+        description: 'Update a variable\'s key and/or value. Workflows using this variable will use the updated value.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Variable ID to update',
+                },
+                key: {
+                    type: 'string',
+                    description: 'New variable key (optional)',
+                },
+                value: {
+                    type: 'string',
+                    description: 'New variable value (optional)',
+                },
+            },
+            required: ['id'],
+        },
+    },
+    {
+        name: 'n8n_delete_variable',
+        description: 'Delete a variable. WARNING: Workflows using this variable may fail if not updated.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Variable ID to delete',
+                },
+            },
+            required: ['id'],
+        },
+    }
 ];
